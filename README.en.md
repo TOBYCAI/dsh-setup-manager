@@ -20,6 +20,18 @@ From a certain version, DSH Desktop became a "shell": the App bundle no longer e
 
 This toolkit codifies the **reliable fixes** for the above into reusable scripts.
 
+## Advantages
+
+Why use this toolkit instead of "manually upgrade, then firefight when it breaks"?
+
+- **Runtime stays authoritative — always.** `pin-runtime.sh` symlinks the shell's and profiles' `@deepseek-ai/*` to the runtime, so the desktop heal resolves straight down to it. Even if a future shell re-bundles dsh into the App, your runtime upgrades and patches **won't be silently overwritten** — a restart recovers them.
+- **Shell and runtime are decoupled and independently upgradeable.** `dsh-manage.sh` splits "upgrade runtime" and "upgrade shell" into two separate commands that never step on each other: the shell pulls from GitHub Releases (backup + replace), the runtime does a clean pnpm reinstall — no cross-contamination.
+- **Upgrades no longer die inside pnpm.** The toolkit detects the host-injected `CODEBUDDY_SAFE_DELETE_*` guard and unsets it when launching web, eliminating the `SAFE_DELETE_BULK_CONFIRM_REQUIRED` failure that plagues plugin updates in non-interactive host terminals.
+- **Breaking interface changes have a fallback.** The rc.2 `prepareCall` adapter change breaks third-party plugins on upgrade; the toolkit ships a ready `patches/` pnpm-patch flow that you can pin temporarily and remove in one step once upstream catches up — a clear downgrade path.
+- **Cross-platform, zero hard-coding.** Every path is parameterized via `DSH_HOME` / `DSH_APP` / `DSH_PNPM` etc. — full features on macOS, core features on Linux/others. Scripts pass `bash -n` / `node --check` with no mystery absolute paths.
+- **Idempotent, auditable, reversible.** Pinning keeps `bundle-bak-<timestamp>/` real dirs for rollback; patches skip already-applied files via markers; every action's root cause is documented in the README — not a black-box one-click script.
+- **Open source, MIT, forkable.** The whole solution is a set of readable shell/node scripts with no build step; easier to modify than to read the docs.
+
 ## Compatibility matrix (plugin / version vs DSH version)
 
 Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠️ means the web fails to start or a feature breaks on that combo, and you need a `patches/` fix from this toolkit or wait for upstream.

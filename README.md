@@ -20,6 +20,18 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 
 本工具包把上述问题的**可靠解法**固化成可复用脚本。
 
+## 优势
+
+为什么不用"手动升级 + 出了问题再救火"，而是用这一套工具包？
+
+- **runtime 永远权威** —— `pin-runtime.sh` 把壳和 profiles 的 `@deepseek-ai/*` 全部软链到 runtime，桌面 heal 顺链而下。壳哪怕明天把 dsh 重新塞回 App 包，你的 runtime 升级与补丁也**不会被静默覆盖**，重启即恢复。
+- **壳与 runtime 解耦、各自可升** —— `dsh-manage.sh` 把"升级 runtime"和"升级壳"拆成两条独立命令，不会互相踩；壳走 GitHub Releases 自动下载备份替换，runtime 走 pnpm 干净重装，互不污染。
+- **升级不再卡死在 pnpm** —— 自动识别宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 守卫并在启动 web 时卸载，彻底解决"更新插件时 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 直接失败"这种非交互环境下的诡异报错。
+- **破坏性接口变更有兜底** —— rc.2 的 `prepareCall` adapter API 变更对第三方插件是"一升级就崩"，工具包提供 `patches/` 现成 pnpm patch 流程，临时固化、上游修复即可一键移除，降级路径清晰。
+- **跨平台 + 零硬编码** —— 所有路径通过 `DSH_HOME` / `DSH_APP` / `DSH_PNPM` 等环境变量适配，macOS 全功能、Linux/其他核心可用；脚本 `bash -n` / `node --check` 干净，无神秘绝对路径。
+- **幂等、可审计、可回滚** —— 钉死操作保留 `bundle-bak-<时间戳>/` 真实目录便于回滚；补丁带标记跳过已应用项；所有动作在 README 里讲清根因，不是黑盒一键脚本。
+- **开源、MIT、可 fork** —— 整个方案就是一组可读 shell/node 脚本，没有编译步骤，改起来比读文档还快。
+
 ## 兼容性矩阵（插件 / 版本 vs DSH 版本）
 
 升级 DSH 前先看这一节：哪些插件在哪个 DSH 版本上会"不适配"。标注 ⚠️ 的意味着该组合下 web 启动或特定功能会崩，需要本工具包的 `patches/` 补丁或等上游修复。
