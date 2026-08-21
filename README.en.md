@@ -150,3 +150,7 @@ Re-run `bin/pin-runtime.sh` to re-pin. `bundle-bak-<timestamp>/` keeps the repla
 ## License
 
 [MIT](./LICENSE)
+
+## Promote & submit
+
+Want more DSH users to find this project? See [docs/PROMOTION.md](./docs/PROMOTION.md) — a channel-by-channel submission list, copy-paste post templates, and timing tips (Hacker News / Reddit / CSDN / Juejin / V2EX / Product Hunt).

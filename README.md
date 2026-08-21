@@ -152,3 +152,7 @@ bin/dsh-manage.sh status
 ## License
 
 [MIT](./LICENSE)
+
+## 推广与投稿
+
+想帮这个项目被更多 DSH 用户看到？看 [docs/PROMOTION.md](./docs/PROMOTION.md) —— 分渠道投稿清单、文案模板与节奏建议（含 Hacker News / Reddit / CSDN / 掘金 / V2EX / Product Hunt）。
