@@ -2,7 +2,13 @@
 
 > [中文](./README.md) | English
 
-One-command management for upgrading **DeepSeek Harness (DSH)**'s "shared install (runtime)" and "desktop shell", and fixing the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard, third-party plugins not适配 to the new adapter API).
+![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-upgrade-toolkit?style=flat-square&color=facc15)
+![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
+![Downloads@latest](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/latest/total?style=flat-square&color=14b8a6)
+![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
+![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
+
+One-command management for upgrading **DeepSeek Harness (DSH)**'s "shared install (runtime)" and "desktop shell", and fixing the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard, third-party plugins not adapted to the new adapter API).
 
 ## Why this exists
 
@@ -13,6 +19,24 @@ From a certain version, DSH Desktop became a "shell": the App bundle no longer e
 3. **Third-party plugins not adapted to the new adapter API** — e.g. rc.2 requires every LLM adapter to implement `prepareCall`; plugins like `@liustack/modlens` that lack it crash the web startup.
 
 This toolkit codifies the **reliable fixes** for the above into reusable scripts.
+
+## Compatibility matrix (plugin / version vs DSH version)
+
+Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠️ means the web fails to start or a feature breaks on that combo, and you need a `patches/` fix from this toolkit or wait for upstream.
+
+| Plugin (pkg) | Incompatible DSH version | Symptom | Root cause | Status / Fix |
+|------|------|------|------|------|
+| `@liustack/modlens` | **≤ 3.23.0 on `0.1.1-rc.2`** | web fails with `registration.adapter.prepareCall is not a function` | rc.2 introduced an adapter API change: every LLM adapter must implement `prepareCall(config, signal)`; modlens 3.22.2 / 3.23.0 adapters don't | ⚠️ Temporarily pinned via `patches/modlens-prepareCall.md` (pnpm patch). **Remove the patch once modlens > 3.23.0 supports rc.2 natively** |
+| `@liustack/modlens` | `0.1.1-rc.1` and earlier | No known adapter crash (rc.2 is what enforces `prepareCall`) | — | ✅ Compatible |
+| Any third-party LLM adapter plugin | `0.1.1-rc.2` | May also throw `adapter.<method> is not a function` | rc.2 unified the adapter interface contract; old plugins didn't catch up | ⚠️ Add the missing method to that plugin following the modlens patch; or pin to rc.1 until upstream adapts |
+| `@deepseek-ai/dsh` itself | `0.1.1-rc.2` (with an old shell) | runtime silently overwritten / patches lost after a shell update | shell re-bundles dsh, heal closure re-points profiles symlinks back to the shell | ✅ Pin runtime as authority with `pin-runtime.sh` |
+| Desktop shell (`DSH Desktop.app`) | After any runtime upgrade | shell-bundled version drifts from runtime version | shell and runtime are decoupled and must be upgraded separately | ✅ Upgrade the shell alone with `dsh-manage.sh shell` |
+
+**How to read the table**:
+
+- The **DSH version** is the version of `@deepseek-ai/dsh` inside `~/.dsh/runtime` (check with `bin/dsh-manage.sh status`). The shell App version is a separate thing — the two are decoupled.
+- rc.2 is a **breaking adapter interface change**, not just modlens: any custom/third-party LLM adapter must implement `prepareCall` and other new methods, or the web won't start.
+- Patches are **temporary**: once the plugin ships a version that natively supports the target DSH version, delete `patches/` and the `patchedDependencies` entry in `package.json` to return to a clean dependency tree.
 
 ## Architecture
 

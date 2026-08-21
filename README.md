@@ -2,6 +2,12 @@
 
 > 中文 | [English](./README.en.md)
 
+![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-upgrade-toolkit?style=flat-square&color=facc15)
+![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
+![Downloads@latest](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/latest/total?style=flat-square&color=14b8a6)
+![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
+![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
+
 一键管理 **DeepSeek Harness（DSH）** 的「共享安装（runtime）」与「桌面壳」的升级，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截、第三方插件未适配新 adapter API）。
 
 ## 为什么需要它
@@ -13,6 +19,24 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 3. **第三方插件未适配新 adapter API** —— 例如 rc.2 要求每个 LLM adapter 实现 `prepareCall`，而 `@liustack/modlens` 等插件缺该方法会直接导致 web 启动崩溃。
 
 本工具包把上述问题的**可靠解法**固化成可复用脚本。
+
+## 兼容性矩阵（插件 / 版本 vs DSH 版本）
+
+升级 DSH 前先看这一节：哪些插件在哪个 DSH 版本上会"不适配"。标注 ⚠️ 的意味着该组合下 web 启动或特定功能会崩，需要本工具包的 `patches/` 补丁或等上游修复。
+
+| 插件（包名） | 不适配的 DSH 版本 | 现象 | 根因 | 状态 / 解法 |
+|------|------|------|------|------|
+| `@liustack/modlens` | **≤ 3.23.0 在 `0.1.1-rc.2`** | web 启动报 `registration.adapter.prepareCall is not a function` | rc.2 引入 adapter API 变更：每个 LLM adapter 必须实现 `prepareCall(config, signal)`，而 modlens 3.22.2 / 3.23.0 的 adapter 未实现该方法 | ⚠️ 已用 `patches/modlens-prepareCall.md` 的 pnpm patch 临时固化；**modlens > 3.23.0 原生支持 rc.2 后可移除补丁** |
+| `@liustack/modlens` | `0.1.1-rc.1` 及更早 | 无已知 adapter 崩溃（rc.2 才强制 `prepareCall`） | — | ✅ 兼容 |
+| 任意第三方 LLM adapter 插件 | `0.1.1-rc.2` | 同样可能报 `adapter.<method> is not a function` | rc.2 统一了 adapter 接口契约，旧插件未跟进 | ⚠️ 参照 modlens 补丁给该插件加缺失方法；或锁定到 rc.1 直到上游适配 |
+| `@deepseek-ai/dsh` 本体 | `0.1.1-rc.2`（配合旧壳） | 壳更新后 runtime 被静默覆盖、补丁丢失 | 壳内重新捆绑 dsh，heal 闭包把 profiles 软链指回壳 | ✅ 用 `pin-runtime.sh` 钉死 runtime 权威 |
+| 桌面壳（`DSH Desktop.app`） | 任意 runtime 升级后 | 壳自带版本与 runtime 版本错位 | 壳与 runtime 解耦后需分别升级 | ✅ 用 `dsh-manage.sh shell` 单独升级壳 |
+
+**读表要点**：
+
+- **DSH 版本** 指 `~/.dsh/runtime` 里 `@deepseek-ai/dsh` 的版本（`bin/dsh-manage.sh status` 可查）；壳 App 版本是另一回事，两者已解耦。
+- rc.2 是一次**破坏性 adapter 接口变更**，不只是 modlens——任何自写/第三方 LLM adapter 都要实现 `prepareCall` 等新方法，否则 web 起不来。
+- 补丁是**临时**的：一旦插件上游发版原生支持对应 DSH 版本，删掉 `patches/` 与 `package.json` 里的 `patchedDependencies` 即可回归干净依赖。
 
 ## 架构
 
