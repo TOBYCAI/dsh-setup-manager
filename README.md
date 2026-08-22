@@ -6,6 +6,7 @@
 ![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
 ![Downloads@latest](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/latest/total?style=flat-square&color=14b8a6)
 ![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
+![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-upgrade-toolkit/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
 一键管理 **DeepSeek Harness（DSH）** 的「共享安装（runtime）」与「桌面壳」的升级，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截、第三方插件未适配新 adapter API）。

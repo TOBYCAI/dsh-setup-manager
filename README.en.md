@@ -1,11 +1,12 @@
 # dsh-upgrade-toolkit
 
-> [中文](./README.md) | English
+> 中文 | English
 
 ![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-upgrade-toolkit?style=flat-square&color=facc15)
 ![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
 ![Downloads@latest](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/latest/total?style=flat-square&color=14b8a6)
 ![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
+![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-upgrade-toolkit/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
 One-command management for upgrading **DeepSeek Harness (DSH)**'s "shared install (runtime)" and "desktop shell", and fixing the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard, third-party plugins not adapted to the new adapter API).

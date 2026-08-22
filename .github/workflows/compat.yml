@@ -1,0 +1,19 @@
+name: compat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 4 * * *'   # daily compat check
+
+jobs:
+  lint:
+    name: shell/mjs syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n on shell scripts
+        run: for f in bin/*.sh; do bash -n "$f" || exit 1; done; echo "bash syntax OK"
+      - name: node --check on mjs scripts
+        run: for f in bin/*.mjs; do node --check "$f" || exit 1; done; echo "node syntax OK"
