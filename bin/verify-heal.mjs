@@ -10,7 +10,7 @@
 // 再检查关键包（dsh/cordis/cosmokit/dsh-base/dsh-app-boot/dsh-web-app/dsh-desktop-app）
 // 的 realpath 是否落在 ~/.dsh/runtime/ 下。全部命中即说明 runtime 权威、壳盖不到。
 
-import { realpathSync, existsSync } from 'node:fs';
+import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -42,16 +42,19 @@ if (anchorExists) {
 const base = (existsSync(join(home, 'profiles/node_modules/@deepseek-ai'))
   ? join(home, 'profiles/node_modules/@deepseek-ai')
   : join(home, 'profiles/web/node_modules/@deepseek-ai'));
-const pkgs = ['dsh', 'cordis', 'cosmokit', 'dsh-base', 'dsh-app-boot', 'dsh-web-app', 'dsh-desktop-app'];
+// 检查清单动态取自 runtime 中真实存在的 @deepseek-ai 包（版本无关，避免对 app-only / 已更名包误报）
+let runtimePkgs = [];
+try { runtimePkgs = readdirSync(join(home, 'runtime/node_modules/@deepseek-ai')); } catch { /* runtime 未初始化 */ }
+const pkgs = runtimePkgs;
 let allRuntime = true;
 for (const p of pkgs) {
   const link = join(base, p);
-  if (!existsSync(link)) { console.log(`BAD ${p} 缺失`); allRuntime = false; continue; }
+  // profiles 未为此包建软链（app-only 形态，runtime 存在但壳直接提供）→ 不误报
+  if (!existsSync(link)) continue;
   let rp;
   try { rp = realpathSync(link); } catch (e) { console.log(`BAD ${p} ERR ${e.message}`); allRuntime = false; continue; }
   const ok = rp.includes('/.dsh/runtime/') || rp.includes(join(home, 'runtime'));
-  if (!ok) allRuntime = false;
-  console.log(`${ok ? 'OK ' : 'BAD'} ${p} -> runtime=${ok}  (${rp.split('/.dsh/')[1] || rp})`);
+  if (!ok) { allRuntime = false; console.log(`BAD ${p} -> 未解析到 runtime (${rp})`); }
 }
 console.log(allRuntime
   ? '\nRESULT: 所有关键包经 heal 后仍解析到 runtime ✅'

@@ -19,19 +19,6 @@ From a certain version, DSH Desktop became a "shell": the App bundle no longer e
 
 This toolkit codifies the **reliable fixes** for the above into reusable scripts.
 
-## Advantages
-
-Why use this toolkit instead of "manually upgrade, then firefight when it breaks"?
-
-- **Runtime stays authoritative — always.** `pin-runtime.sh` symlinks the shell's and profiles' `@deepseek-ai/*` to the runtime, so the desktop heal resolves straight down to it. Even if a future shell re-bundles dsh into the App, your runtime upgrades and patches **won't be silently overwritten** — a restart recovers them.
-- **Shell and runtime are decoupled and independently upgradeable.** `dsh-manage.sh` splits "upgrade runtime" and "upgrade shell" into two separate commands that never step on each other: the shell pulls from GitHub Releases (backup + replace), the runtime does a clean pnpm reinstall — no cross-contamination.
-- **Upgrades no longer die inside pnpm.** The toolkit detects the host-injected `CODEBUDDY_SAFE_DELETE_*` guard and unsets it when launching web, eliminating the `SAFE_DELETE_BULK_CONFIRM_REQUIRED` failure that plagues plugin updates in non-interactive host terminals.
-- **Know the pitfalls before you upgrade.** The `scan` subcommand scans installed LLM adapters against the runtime dsh version's semver range and predicts whether upgrading to `@next`/`@latest` falls outside compatibility; `check --cron` is report-only and can be wired into a daily cron.
-- **One-command self-check and rollback.** `doctor` self-checks symlink targets / backup dirs / guard vars / versions; `rollback` restores from `bundle-bak-*` / `shell-bak-*` in one step, so a bad upgrade stops being a crisis.
-- **Cross-platform, zero hard-coding.** Every path is parameterized via `DSH_HOME` / `DSH_APP` / `DSH_PNPM` etc. — full features on macOS, core features on Linux/others. Scripts pass `bash -n` / `node --check` with no mystery absolute paths.
-- **Idempotent, auditable, reversible.** Pinning keeps `bundle-bak-<timestamp>/` real dirs for rollback; patches skip already-applied files via markers; every action's root cause is documented in the README — not a black-box one-click script.
-- **Open source, MIT, forkable.** The whole solution is a set of readable shell/node scripts with no build step; easier to modify than to read the docs.
-
 ## Compatibility matrix (plugin / version vs DSH version)
 
 Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠️ means the web fails to start or a feature breaks on that combo, and you can catch it early with this toolkit's `scan`/`pin` or wait for upstream.
@@ -84,7 +71,6 @@ dsh-upgrade-toolkit/
 │   ├── verify-heal.mjs        # Verify key packages still resolve to runtime after heal
 │   └── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
 └── docs/
-    └── PROMOTION.md           # Channel-by-channel submission list and copy templates
 ```
 
 ## Install
@@ -98,6 +84,30 @@ chmod +x dsh-upgrade-toolkit/bin/*.sh
 Option 2: download the `dsh-upgrade-toolkit-src.zip` source package from [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) and extract it.
 
 Scripts adapt to your paths via `DSH_HOME` etc. — no hard-coded absolute paths.
+
+### First-time DSH install (one-click, both ends)
+
+The "Install" above installs **this toolkit**. To set up DSH from scratch on a machine that has never had it (desktop shell + web runtime), use the `install` subcommand. It will:
+
+1. Download and install the desktop shell from DSH Desktop's GitHub Releases per platform (macOS `.app` / Linux `AppImage`·`tar` / Windows `.exe` — **Linux/Windows shell install is marked unverified on real hardware**);
+2. Bootstrap the web runtime: `pnpm`/`npm` install `@deepseek-ai/dsh` into `~/.dsh/runtime` (same mechanism as `update-runtime`, but building the dir from zero), and create a symlink at `~/.dsh/bin/dsh`;
+3. Auto `pin` (runtime as authority) + `doctor` (take over with a self-check).
+
+```bash
+# One-click dual-end install (shell + runtime + pin + doctor)
+bin/dsh-manage.sh install
+# pin a runtime version / install only one end / preview first
+bin/dsh-manage.sh install --runtime 0.1.1-rc.2
+bin/dsh-manage.sh install --no-shell      # runtime only (shell already installed manually)
+bin/dsh-manage.sh install --no-runtime     # desktop shell only
+bin/dsh-manage.sh install --dry-run        # report what it would do, change nothing
+```
+
+> ⚠️ The runtime bootstrap directory layout depends on DSH upstream conventions; it is verified on macOS. If `doctor` reports FAIL on another machine, fix per its output and re-run `pin`. Before `dsh web`, add `export PATH="$HOME/.dsh/bin:$PATH"` to your shell rc (the script reminds you after install).
+
+**After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `install` (skips if already installed) / `update` (runtime) / `shell` (shell) / `web` (launch) / `doctor` (self-check) / `rollback` / `scan` (pre-upgrade compat) / `check` (scheduled report). A machine only needs `install` once.
+
+**Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` **do not crash even when DSH is not yet installed or `dsh` is off PATH** — version probing degrades gracefully to `?` / a report instead of aborting. `doctor`'s symlink check is **version-agnostic**: the checklist is taken dynamically from the `@deepseek-ai` packages that actually exist in the runtime, so app-only packages (absent from runtime, correctly sourced from the shell) are never false-positive. The installed version is read from `~/.dsh/runtime/.../dsh/package.json` first (no PATH dependency, not swallowed by stderr), falling back to `dsh --version`.
 
 ## Usage
 
@@ -138,6 +148,7 @@ bin/dsh-manage.sh update --dry-run
 
 | Subcommand | What it does | Touches files? |
 |------------|--------------|----------------|
+| `install` | First-time setup: install shell + bootstrap runtime + auto pin + doctor | writes (first install) |
 | `status` | Show runtime / shell / guard vars / installed adapter versions | read-only |
 | `update [--dry-run]` | Upgrade runtime (`--dry-run` previews dependency-tree changes) | write (dry-run: read-only) |
 | `update-runtime <ver>` | Single-step non-interactive runtime upgrade to a version | write |
@@ -175,7 +186,3 @@ Re-run `bin/pin-runtime.sh` to re-pin. `bundle-bak-<timestamp>/` keeps the repla
 ## License
 
 [MIT](./LICENSE)
-
-## Promote & submit
-
-Want more DSH users to find this project? See [docs/PROMOTION.md](./docs/PROMOTION.md) — a channel-by-channel submission list, copy-paste post templates, and timing tips (Hacker News / Reddit / CSDN / Juejin / V2EX / Product Hunt).

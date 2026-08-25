@@ -29,6 +29,8 @@
 #   dsh-manage.sh scan                        扫描已装 LLM adapter 与当前 runtime 的版本兼容性
 #   dsh-manage.sh check [--cron]             健康检查 + 更新可用性（默认仅报告，不自动改）
 #   dsh-manage.sh rollback [runtime|shell|all]  从备份还原（交互确认）
+#   dsh-manage.sh install [--runtime <ver>] [--no-shell] [--no-runtime] [--dry-run]
+#                                    一键双端安装：下载安装桌面壳 + 引导 runtime + 自动 pin + doctor
 #
 # 适用：macOS（壳升级走 .app + hdiutil）；Linux / Windows 壳升级为可移植框架（标注未验证）。
 # ============================================================================
@@ -96,12 +98,22 @@ _dsh_guard_unset_args() {
 # ---- 一次拉取 next/latest 两个 dist-tag ----
 _dsh_check_update() {
   local tags next latest inst
-  tags="$(npm view @deepseek-ai/dsh dist-tags --json 2>/dev/null)"
+  tags="$(npm view @deepseek-ai/dsh dist-tags --json 2>/dev/null || true)"
   if [ -n "$tags" ]; then
-    next="$(printf '%s' "$tags" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=JSON.parse(s).next||""}catch(e){}console.log(v)})' 2>/dev/null)"
-    latest="$(printf '%s' "$tags" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=JSON.parse(s).latest||""}catch(e){}console.log(v)})' 2>/dev/null)"
+    next="$(printf '%s' "$tags" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=JSON.parse(s).next||""}catch(e){}console.log(v)})' 2>/dev/null || true)"
+    latest="$(printf '%s' "$tags" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=JSON.parse(s).latest||""}catch(e){}console.log(v)})' 2>/dev/null || true)"
   fi
-  inst="$(dsh --version 2>/dev/null | head -n1)"
+  # 已安装版本：优先读 runtime 内 package.json（最权威、不依赖 PATH / dsh 的 stderr 输出），
+  # 缺失时回退到 dsh --version（合并 stderr，避免被 2>/dev/null 吞掉）。
+  # 注意：dsh 可能不在 PATH，或其 wrapper 把版本打到 stderr（如 "CLI not found"），
+  # 下方必须 || true，否则 set -e + pipefail 会让 status/doctor/check/update --dry-run
+  # 等只读命令在 dsh 缺失 / profiles 软链损坏时直接 abort 或得到空版本。
+  inst=""
+  local pj="$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/package.json"
+  if [ -f "$pj" ]; then
+    inst="$(node -e 'try{console.log(require(process.argv[1]).version)}catch(e){}' "$pj" 2>/dev/null || true)"
+  fi
+  [ -z "$inst" ] && inst="$(dsh --version 2>&1 | head -n1 || true)"
   _DSH_NEXT="$next"; _DSH_LATEST="$latest"; _DSH_INST="$inst"
 }
 
@@ -261,6 +273,15 @@ _dsh_web() {
       dsh web ${DSH_PATCH_YML:+"--patch" "$DSH_PATCH_YML"} "$@"
 }
 
+# ---- 跨平台 realpath（macOS /bin/bash 的 readlink 不支持 -f）----
+_dsh_realpath() {
+  if command -v node >/dev/null 2>&1; then
+    node -e 'try{process.stdout.write(require("fs").realpathSync(process.argv[1]))}catch(e){process.stdout.write(process.argv[1])}' "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    local r; r="$(readlink "$1" 2>/dev/null || true)"; [ -n "$r" ] && printf '%s' "$r" || printf '%s' "$1"
+  fi
+}
+
 # ---- 自检 ----
 _dsh_doctor() {
   echo "=== DSH 自检 (doctor) ==="
@@ -276,15 +297,19 @@ _dsh_doctor() {
     fi
     rm -f "$log"
   fi
-  # 2) profiles / app 的 @deepseek-ai/* 软链是否真指向 runtime
-  local base l
+  # 2) profiles / app 的 @deepseek-ai/* 软链是否真指向 runtime（顺着软链链解析，避免假阳性）
+  #    仅校验 runtime 中真实存在的包；app-only 包（runtime 无）本就该指向壳，不误报
+  local base l rp2 realp rtlist name
   base="$(_dsh_profiles_ad)"
-  rp2=""
+  rtlist="$( [ -d "$DSH_HOME/runtime/node_modules/@deepseek-ai" ] && ls "$DSH_HOME/runtime/node_modules/@deepseek-ai" 2>/dev/null || true )"
   if [ -d "$base" ]; then
     for l in "$base"/*; do
       [ -L "$l" ] || continue
+      name="$(basename "$l")"
+      case "$rtlist" in *"$name"*) ;; *) continue ;; esac
       rp2="$(readlink "$l" 2>/dev/null || true)"
-      if [[ "$rp2" != *"/runtime/node_modules/@deepseek-ai/"* ]]; then
+      realp="$(_dsh_realpath "$l" 2>/dev/null || true)"
+      if [[ "$realp" != "$DSH_HOME/runtime"* ]]; then
         echo "  [WARN] $l -> $rp2（未指向 runtime）"; fail=1
       fi
     done
@@ -338,6 +363,134 @@ _dsh_rollback() {
       echo "✓ 壳已回滚到 $sbak。"
     fi
   fi
+}
+
+# ---- 引导 runtime（web 端首次安装）----
+# 在 ~/.dsh/runtime 用 pnpm/npm 装 @deepseek-ai/dsh（与 _dsh_do_upgrade 同一机制，只是目录从零建）。
+# ⚠️ runtime 内部布局依赖 DSH 上游约定，本机已验证可用；换机器若 heal 后 doctor 报 FAIL，按输出手动修正即可。
+_dsh_bootstrap_runtime() {
+  local ver="${1:-}" pnpm binjs
+  if [ -e "$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/package.json" ]; then
+    echo "→ runtime 已存在（$DSH_HOME/runtime），跳过引导（如需重装用 update-runtime <ver>）。"
+    return 0
+  fi
+  if [ -z "$ver" ]; then
+    ver="$(npm view "@deepseek-ai/dsh" dist-tags.latest 2>/dev/null || true)"
+    [ -z "$ver" ] && { echo "✗ 无法获取 @deepseek-ai/dsh 最新版本（离线？）。可用 --runtime <ver> 显式指定。"; return 1; }
+  fi
+  echo "→ 引导 runtime：@deepseek-ai/dsh@$ver → $DSH_HOME/runtime"
+  mkdir -p "$DSH_HOME/runtime"
+  printf '{\n  "name": "dsh-runtime",\n  "version": "1.0.0",\n  "private": true,\n  "dependencies": { "@deepseek-ai/dsh": "%s" }\n}\n' "$ver" > "$DSH_HOME/runtime/package.json"
+  pnpm="$(_dsh_pnpm)"
+  if [ -n "$pnpm" ]; then
+    ( cd "$DSH_HOME/runtime" && "$pnpm" install --shamefully-hoist --ignore-scripts )
+  else
+    ( cd "$DSH_HOME/runtime" && npm install --no-audit --no-fund --ignore-scripts )
+  fi
+  local rc=$?
+  [ $rc -ne 0 ] && { echo "✗ runtime 引导失败（退出 $rc），未改动其他内容。"; return 1; }
+  echo "✓ runtime 引导完成 → $ver"
+  # 确保 dsh 在 PATH：建 ~/.dsh/bin/dsh 软链（指向 runtime 内的 bin）
+  binjs="$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js"
+  if [ -e "$binjs" ]; then
+    mkdir -p "$DSH_HOME/bin"
+    ln -sf "$binjs" "$DSH_HOME/bin/dsh"
+    echo "→ 已创建 $DSH_HOME/bin/dsh 软链。请把下面这行加入你的 shell rc（如 ~/.zshrc）："
+    echo "    export PATH=\"$DSH_HOME/bin:\$PATH\""
+  else
+    echo "⚠ 未找到 runtime 内的 dsh 入口（$binjs），dsh web 前请手动确保 dsh 在 PATH。"
+  fi
+  return 0
+}
+
+# ---- 安装桌面壳（首次安装，无备份）----
+_dsh_shell_install() {
+  local cur="$1" url="$2" tag="$3"
+  [ -z "$url" ] && { echo "✗ 找不到壳下载地址，请手动从 GitHub Releases 安装 DSH Desktop。"; return 1; }
+  case "$(_dsh_os)" in
+    macos)
+      if [ -d "$DSH_APP" ]; then echo "→ 壳已安装在 $DSH_APP，跳过（如需升级用 shell）。"; return 0; fi
+      _dsh_shell_install_macos "$@" ;;
+    linux)   _dsh_shell_install_linux "$@" ;;
+    windows) _dsh_shell_install_windows "$@" ;;
+    *) echo "✗ 未知平台，无法自动安装壳。"; return 1 ;;
+  esac
+}
+_dsh_shell_install_macos() {
+  local cur="$1" url="$2" tag="$3" dmg mnt app
+  dmg="/tmp/DSH.Desktop-$tag.dmg"
+  echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$dmg" "$url" || { echo "✗ 下载失败"; return 1; }
+  mnt="$(hdiutil attach "$dmg" -nobrowse -noautoopen 2>/dev/null | tail -1 | awk -F'\t' '{print $NF}')"
+  [ -z "$mnt" ] && { echo "✗ 挂载 dmg 失败"; rm -f "$dmg"; return 1; }
+  app="$(find "$mnt" -maxdepth 2 -name "*.app" -type d 2>/dev/null | head -1)"
+  if [ -z "$app" ]; then echo "✗ dmg 内未找到 .app"; hdiutil detach "$mnt" >/dev/null 2>&1; rm -f "$dmg"; return 1; fi
+  echo "→ 安装壳到 $DSH_APP"; cp -R "$app" "$DSH_APP"
+  xattr -dr com.apple.quarantine "$DSH_APP" 2>/dev/null || true
+  hdiutil detach "$mnt" >/dev/null 2>&1; rm -f "$dmg"
+  echo "✓ 壳已安装到 $DSH_APP"
+}
+_dsh_shell_install_linux() {
+  local cur="$1" url="$2" tag="$3" dest tmp
+  dest="${DSH_APP:-$DSH_HOME/shell}"
+  [ -e "$dest" ] && { echo "→ 壳已存在于 $dest，跳过（如需升级用 shell）。"; return 0; }
+  tmp="/tmp/DSH.Desktop-$tag"; rm -rf "$tmp"; mkdir -p "$tmp"
+  echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$tmp/asset" "$url" || { echo "✗ 下载失败"; return 1; }
+  mkdir -p "$dest"
+  case "$url" in
+    *.AppImage) cp "$tmp/asset" "$dest/DSH-Desktop.AppImage" && chmod +x "$dest/DSH-Desktop.AppImage" ;;
+    *.tar.gz|*.tar.xz|*.tgz) tar -xf "$tmp/asset" -C "$dest" ;;
+    *) echo "✗ 不支持的 Linux 壳格式: $url"; return 1 ;;
+  esac
+  rm -rf "$tmp"
+  echo "✓ 壳已安装（Linux 路径：$dest）"
+}
+_dsh_shell_install_windows() {
+  local cur="$1" url="$2" tag="$3" exe
+  exe="/tmp/DSH.Desktop-$tag.exe"
+  [ -e "$DSH_APP" ] && { echo "→ 壳已存在于 $DSH_APP，跳过（如需升级用 shell）。"; return 0; }
+  echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$exe" "$url" || { echo "✗ 下载失败"; return 1; }
+  echo "→ 静默安装（/S）…"; "$exe" //S || { echo "✗ 安装失败"; return 1; }
+  rm -f "$exe"
+  echo "✓ 壳已安装（Windows 路径：$DSH_APP）"
+}
+
+# ---- install：一键双端安装（壳 + runtime 引导 + pin + doctor）----
+_dsh_install() {
+  local rtver="" doshell=1 dort=1 dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --runtime) rtver="${2:-}"; shift 2 ;;
+      --no-shell) doshell=0; shift ;;
+      --no-runtime) dort=0; shift ;;
+      --dry-run) dry=1; shift ;;
+      *) shift ;;
+    esac
+  done
+  _dsh_shell_check
+  if [ $dry -eq 1 ]; then
+    echo "ℹ install --dry-run（不做任何改动）："
+    [ $doshell -eq 1 ] && echo "    桌面壳: 将安装 ${_DSH_SHELL_LATEST:-?}（来源 ${_DSH_SHELL_URL:-无}）"
+    [ $dort -eq 1 ] && echo "    runtime: 将引导 @deepseek-ai/dsh@${rtver:-latest}"
+    [ $doshell -eq 0 ] && echo "    桌面壳: 跳过（--no-shell）"
+    [ $dort -eq 0 ] && echo "    runtime: 跳过（--no-runtime）"
+    echo "    完成后会自动 pin + doctor 接管。"
+    exit 0
+  fi
+  if [ $doshell -eq 1 ]; then
+    if [ -t 0 ]; then
+      if _dsh_confirm "安装桌面壳（DSH Desktop ${_DSH_SHELL_LATEST:-最新}）? [y/N] "; then
+        _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST" || echo "⚠ 壳安装失败，可手动安装后重跑"
+      else echo "  跳过壳安装（--no-shell 可显式跳过）"; fi
+    else
+      _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST" || echo "⚠ 壳安装失败（非交互环境已尝试）"
+    fi
+  fi
+  if [ $dort -eq 1 ]; then
+    _dsh_bootstrap_runtime "$rtver" || echo "⚠ runtime 引导失败，可手动 bootstrap 后重跑"
+  fi
+  echo "→ 钉死 runtime 权威…"; zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
+  echo "→ 自检…"; _dsh_doctor || true
+  echo "✓ 安装流程结束。后续维护：dsh-manage.sh update / shell / web / doctor / rollback"
 }
 
 cmd="${1:-status}"; shift || true
@@ -411,10 +564,11 @@ case "$cmd" in
     fi
     ;;
   rollback) _dsh_rollback "${1:-runtime}" ;;
+  install) _dsh_install "$@" ;;
   status)
     _dsh_check_update; _dsh_shell_check
     echo "runtime 当前: ${_DSH_INST:-?} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
     echo "壳     当前: ${_DSH_SHELL_CUR:-?} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
     ;;
-  *) echo "用法: dsh-manage.sh {update [--dry-run]|update-runtime <ver>|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]}" >&2; exit 1 ;;
+  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]}" >&2; exit 1 ;;
 esac

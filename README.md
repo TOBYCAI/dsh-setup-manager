@@ -19,19 +19,6 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 
 本工具包把上述问题的**可靠解法**固化成可复用脚本。
 
-## 优势
-
-为什么不用"手动升级 + 出了问题再救火"，而是用这一套工具包？
-
-- **runtime 永远权威** —— `pin-runtime.sh` 把壳和 profiles 的 `@deepseek-ai/*` 全部软链到 runtime，桌面 heal 顺链而下。壳哪怕明天把 dsh 重新塞回 App 包，你的 runtime 升级与补丁也**不会被静默覆盖**，重启即恢复。
-- **壳与 runtime 解耦、各自可升** —— `dsh-manage.sh` 把"升级 runtime"和"升级壳"拆成两条独立命令，不会互相踩；壳走 GitHub Releases 自动下载备份替换，runtime 走 pnpm 干净重装，互不污染。
-- **升级不再卡死在 pnpm** —— 自动识别宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 守卫并在启动 web 时卸载，彻底解决"更新插件时 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 直接失败"这种非交互环境下的诡异报错。
-- **升级前先知会踩哪些坑** —— `scan` 子命令扫描已装 LLM adapter 与 runtime dsh 版本的 semver 范围，预测升级到 `@next`/`@latest` 是否掉出兼容范围；`check --cron` 仅报告模式可挂定时任务每天自检。
-- **一键自检与回滚** —— `doctor` 自检软链指向 / 备份目录 / 守卫变量 / 版本；`rollback` 从 `bundle-bak-*` / `shell-bak-*` 一键还原，升级出错不再手忙脚乱。
-- **跨平台 + 零硬编码** —— 所有路径通过 `DSH_HOME` / `DSH_APP` / `DSH_PNPM` 等环境变量适配，macOS 全功能、Linux/Windows 壳升级框架已就位（后两者标注未经真机验证）；脚本 `bash -n` / `node --check` 干净，无神秘绝对路径。
-- **幂等、可审计、可回滚** —— 钉死操作保留 `bundle-bak-<时间戳>/` 真实目录便于回滚；补丁带标记跳过已应用项；所有动作在 README 里讲清根因，不是黑盒一键脚本。
-- **开源、MIT、可 fork** —— 整个方案就是一组可读 shell/node 脚本，没有编译步骤，改起来比读文档还快。
-
 ## 兼容性矩阵（插件 / 版本 vs DSH 版本）
 
 升级 DSH 前先看这一节：哪些插件在哪个 DSH 版本上会"不适配"。标注 ⚠️ 的意味着该组合下 web 启动或特定功能会崩，可用本工具包的 `scan`/`pin` 提前发现或等上游修复。
@@ -84,7 +71,6 @@ dsh-upgrade-toolkit/
 │   ├── verify-heal.mjs        # 校验 heal 后关键包是否仍解析到 runtime
 │   └── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
 └── docs/
-    └── PROMOTION.md           # 分渠道投稿清单与文案模板
 ```
 
 ## 安装
@@ -100,6 +86,30 @@ chmod +x dsh-upgrade-toolkit/bin/*.sh
 方式二：从 [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) 下载 `dsh-upgrade-toolkit-src.zip` 源码包，解压即可。
 
 脚本通过 `DSH_HOME` 等环境变量适配你的实际路径，无需硬编码。
+
+### 首次安装 DSH（一键双端）
+
+上面"安装"指的是**安装这套工具包**。如果你要在一台**还没装过 DSH** 的机器上从零装好 DSH（桌面壳 + web runtime），直接用 `install` 子命令，它会：
+
+1. 按平台从 DSH Desktop 的 GitHub Releases 下载并安装桌面壳（macOS `.app` / Linux `AppImage`·`tar` / Windows `.exe`，**Linux/Windows 壳安装标注未经真机验证**）；
+2. 引导 web runtime：在 `~/.dsh/runtime` 用 pnpm/npm 安装 `@deepseek-ai/dsh`（与 `update-runtime` 同一机制，只是从零建目录），并在 `~/.dsh/bin/dsh` 建好软链；
+3. 自动 `pin`（钉死 runtime 权威）+ `doctor`（自检接管）。
+
+```bash
+# 一键双端安装（壳 + runtime + pin + doctor）
+bin/dsh-manage.sh install
+# 指定 runtime 版本 / 只装一端 / 先预览
+bin/dsh-manage.sh install --runtime 0.1.1-rc.2
+bin/dsh-manage.sh install --no-shell        # 只引导 runtime（壳已手动装好）
+bin/dsh-manage.sh install --no-runtime       # 只装桌面壳
+bin/dsh-manage.sh install --dry-run          # 只报告将做什么，不改动
+```
+
+> ⚠️ runtime 引导的目录布局依赖 DSH 上游约定，macOS 上已验证可用；换机器若 `doctor` 报 FAIL，按输出手动修正后重跑 `pin` 即可。`dsh web` 前请把 `export PATH="$HOME/.dsh/bin:$PATH"` 加入你的 shell rc（脚本安装完会提示）。
+
+**安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`install`（已装则跳过）/ `update`（升 runtime）/ `shell`（升壳）/ `web`（启动）/ `doctor`（自检）/ `rollback`（回滚）/ `scan`（升级前查兼容）/ `check`（定时报告）。一台机器只需 `install` 一次。
+
+**健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、或 `dsh` 不在 PATH 时也不会崩溃**——版本探测失败只降级为 `?` / 优雅报告，不再中断。`doctor` 的软链校验是**版本无关**的：检查清单动态取自 runtime 中真实存在的 `@deepseek-ai` 包，app-only 包（runtime 中没有、本就该来自壳）不会误报。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`（不依赖 PATH、不被 stderr 吞），缺失时回退 `dsh --version`。
 
 ## 使用
 
@@ -140,6 +150,7 @@ bin/dsh-manage.sh update --dry-run
 
 | 子命令 | 作用 | 是否改文件 |
 |------|------|------|
+| `install` | 首次安装：下载桌面壳 + 引导 runtime + 自动 pin + doctor | 写（首次安装） |
 | `status` | 显示 runtime / 壳 / 守卫变量 / 已装 adapter 版本 | 只读 |
 | `update [--dry-run]` | 升级 runtime（`--dry-run` 仅预览依赖树变更） | 写（dry-run 只读） |
 | `update-runtime <ver>` | 单步非交互升级 runtime 到指定版本 | 写 |
@@ -177,7 +188,3 @@ bin/dsh-manage.sh update --dry-run
 ## License
 
 [MIT](./LICENSE)
-
-## 推广与投稿
-
-想帮这个项目被更多 DSH 用户看到？看 [docs/PROMOTION.md](./docs/PROMOTION.md) —— 分渠道投稿清单、文案模板与节奏建议（含 Hacker News / Reddit / CSDN / 掘金 / V2EX / Product Hunt）。
