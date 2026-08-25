@@ -91,7 +91,7 @@ dsh-upgrade-toolkit/
 ## Install
 
 ```bash
-# Option 1: git clone (recommended — counts toward clone stats)
+# Option 1: git clone (recommended)
 git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
 chmod +x dsh-upgrade-toolkit/bin/*.sh
 ```

@@ -91,7 +91,7 @@ dsh-upgrade-toolkit/
 ## 安装
 
 ```bash
-# 方式一：git clone（推荐 —— 计入项目克隆统计）
+# 方式一：git clone（推荐）
 git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
 # 或把本目录放到任意位置，例如：
 #   ~/Downloads/DSH_dev/published/dsh-upgrade-toolkit
