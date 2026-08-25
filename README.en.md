@@ -91,9 +91,12 @@ dsh-upgrade-toolkit/
 ## Install
 
 ```bash
-git clone <your-repo-url> dsh-upgrade-toolkit
+# Option 1: git clone (recommended — counts toward clone stats)
+git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
 chmod +x dsh-upgrade-toolkit/bin/*.sh
 ```
+
+Option 2: download the `dsh-upgrade-toolkit-src.zip` source package from [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) and extract it.
 
 Scripts adapt to your paths via `DSH_HOME` etc. — no hard-coded absolute paths.
 
@@ -108,7 +111,7 @@ bin/dsh-manage.sh update
 # or non-interactively to a specific version:
 bin/dsh-manage.sh update-runtime 0.1.1-rc.2
 
-# 3) Upgrade the desktop shell (download universal dmg from GitHub Releases, backup then replace)
+# 3) Upgrade the desktop shell (dsh-manage.sh auto-downloads the universal dmg from DSH Desktop's GitHub Releases, backs up then replaces)
 bin/dsh-manage.sh shell
 
 # 4) Launch web (auto-unloads safe-delete guard so pnpm isn't blocked)

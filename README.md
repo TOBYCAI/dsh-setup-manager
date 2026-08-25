@@ -91,11 +91,14 @@ dsh-upgrade-toolkit/
 ## 安装
 
 ```bash
-git clone <your-repo-url> dsh-upgrade-toolkit
+# 方式一：git clone（推荐 —— 计入项目克隆统计）
+git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
 # 或把本目录放到任意位置，例如：
 #   ~/Downloads/DSH_dev/published/dsh-upgrade-toolkit
 chmod +x dsh-upgrade-toolkit/bin/*.sh
 ```
+
+方式二：从 [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) 下载 `dsh-upgrade-toolkit-src.zip` 源码包，解压即可。
 
 脚本通过 `DSH_HOME` 等环境变量适配你的实际路径，无需硬编码。
 
@@ -110,7 +113,7 @@ bin/dsh-manage.sh update
 # 或单步非交互升级到指定版本：
 bin/dsh-manage.sh update-runtime 0.1.1-rc.2
 
-# 3) 升级桌面壳（从 GitHub Releases 下载 universal dmg，备份后替换）
+# 3) 升级桌面壳（dsh-manage.sh 自动从 DSH Desktop 的 GitHub Releases 下载 universal dmg，备份后替换）
 bin/dsh-manage.sh shell
 
 # 4) 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截）
