@@ -39,7 +39,9 @@ if (anchorExists) {
   console.warn('⚠ 未提供 app-pkg，跳过 heal 模拟，仅检查现有 profiles 链接。');
 }
 
-const base = join(home, '.dsh/profiles/node_modules/@deepseek-ai');
+const base = (existsSync(join(home, 'profiles/node_modules/@deepseek-ai'))
+  ? join(home, 'profiles/node_modules/@deepseek-ai')
+  : join(home, 'profiles/web/node_modules/@deepseek-ai'));
 const pkgs = ['dsh', 'cordis', 'cosmokit', 'dsh-base', 'dsh-app-boot', 'dsh-web-app', 'dsh-desktop-app'];
 let allRuntime = true;
 for (const p of pkgs) {

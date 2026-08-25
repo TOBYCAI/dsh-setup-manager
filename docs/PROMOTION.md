@@ -8,7 +8,7 @@
 |------|------|
 | 是什么 | DSH `runtime`（共享安装）与桌面壳的管理 + 升级后破坏性问题的修复工具包 |
 | 不是什么 | 不是另一个 DSH 桌面端（那是 `anywhere-labs/deepseek-harness-desktop` 做的事） |
-| 解决什么 | 壳覆盖 runtime、pnpm 被 safe-delete 守卫拦截、第三方插件（如 modlens）未适配 rc.2 `prepareCall` |
+| 解决什么 | 壳覆盖 runtime、pnpm 被 safe-delete 守卫拦截（modlens 的 rc.2 `prepareCall` 问题上游 ≥3.23.x 已修复，无需补丁） |
 | 目标受众 | 自己装过 DSH、踩过升级坑、用 WorkBuddy/CodeBuddy 终端跑 `dsh web` 的开发者 |
 | 一句话钩子 | “升级 DSH 后 runtime 被壳覆盖、插件崩、pnpm 卡死？这一个工具包全修好。” |
 
@@ -16,7 +16,7 @@
 1. runtime 永远权威，壳更新盖不到
 2. 壳与 runtime 解耦，各自独立升级
 3. 自动卸掉宿主 safe-delete 守卫，pnpm 升级插件不再失败
-4. rc.2 破坏性 adapter 接口变更有现成补丁兜底
+4. 升级前 `scan` 先知会踩哪些坑、`doctor` 自检、`rollback` 一键回滚
 5. 跨平台、零硬编码、MIT 可 fork
 
 ## 1. DSH 生态内部渠道（优先级最高）
@@ -77,13 +77,13 @@ Show HN: A toolkit to safely upgrade DeepSeek Harness (runtime + shell)
 
 DeepSeek Harness (DSH) ships as a "shell" app that depends on a shared
 install (~/.dsh/runtime). Upgrading either one silently breaks the other,
-and DSH 0.1.1-rc.2's new adapter API crashes third-party plugins (e.g.
-@liustack/modlens).
+and the host-injected safe-delete guard blocks pnpm plugin updates in
+non-interactive terminals.
 
 This MIT toolkit (bash + node, zero hard-coded paths) pins the runtime as
 the authority, decouples shell/runtime upgrades, unloads the host
-safe-delete guard that blocks pnpm plugin updates, and ships a pnpm-patch
-for the rc.2 prepareCall breakage.
+safe-delete guard that blocks pnpm plugin updates, and adds scan/doctor/
+rollback so you know the pitfalls and can recover before anything breaks.
 
 https://github.com/TOBYCAI/dsh-upgrade-toolkit
 ```
@@ -95,7 +95,7 @@ https://github.com/TOBYCAI/dsh-upgrade-toolkit
 If you self-host DeepSeek Harness and have been bitten by:
 - shell update overwriting your runtime + patches
 - pnpm plugin update failing with SAFE_DELETE_BULK_CONFIRM_REQUIRED
-- rc.2 breaking @liustack/modlens with "prepareCall is not a function"
+- a third-party LLM adapter still on a pre-rc.2 interface crashing on launch
 
 ...this toolkit pins runtime as authority, splits shell/runtime upgrades,
 and includes a ready pnpm patch. MIT, cross-platform.
@@ -103,16 +103,16 @@ and includes a ready pnpm patch. MIT, cross-platform.
 
 ### 中文社区（V2EX / 掘金 引子）
 ```
-做了个 DSH 升级工具包：解决壳覆盖 runtime、pnpm 被守卫拦截、插件适配 rc.2 崩溃
+做了个 DSH 升级工具包：解决壳覆盖 runtime、pnpm 被守卫拦截、升级前不知会踩哪些坑
 
 DeepSeek Harness 把桌面端做成了“壳”，依赖 ~/.dsh/runtime 提供上游能力。
-升级壳之后 runtime 常被静默覆盖，第三方插件（如 modlens）在 rc.2 还直接崩。
+升级壳之后 runtime 常被静默覆盖（modlens 的 rc.2 prepareCall 问题上游 ≥3.23.x 已修复，无需补丁）。
 
 这个 MIT 工具包把这几类坑的可靠解法固化成脚本：
 1. pin-runtime 钉死 runtime 权威
 2. 壳/runtime 解耦各自升级
 3. 启动 web 时卸掉宿主 safe-delete 守卫
-4. rc.2 prepareCall 补丁兜底
+4. scan 预检兼容性 + doctor 自检 + rollback 一键回滚
 
 仓库：https://github.com/TOBYCAI/dsh-upgrade-toolkit
 ```
