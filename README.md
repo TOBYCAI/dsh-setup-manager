@@ -32,7 +32,7 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 
 **读表要点**：
 
-- **DSH 版本** 指 `~/.dsh/runtime` 里 `@deepseek-ai/dsh` 的版本（`bin/dsh-manage.sh status` 可查）；壳 App 版本是另一回事，两者已解耦。
+- **DSH 版本** 指 `~/.dsh/runtime` 里 `@deepseek-ai/dsh` 的版本（`dsm status` 可查）；壳 App 版本是另一回事，两者已解耦。
 - rc.2 曾是一次**破坏性 adapter 接口变更**（每个 LLM adapter 须实现 `prepareCall` 等新方法），但主流插件 `@liustack/modlens` 已在 **≥ 3.23.x** 原生修复；其余老旧插件用 `bin/scan-adapters.mjs` 扫描即可提前发现兼容风险。
 
 ## 架构
@@ -87,6 +87,18 @@ chmod +x dsh-upgrade-toolkit/bin/*.sh
 
 脚本通过 `DSH_HOME` 等环境变量适配你的实际路径，无需硬编码。
 
+### 挂上 dsm 快捷别名（推荐）
+
+把下面一行加进你的 shell rc（`~/.zshrc` 或 `~/.bashrc`），之后所有命令都能用 `dsm` 代替 `bin/dsh-manage.sh`：
+
+```bash
+# 把路径换成你实际 clone / 解压 toolkit 的位置
+echo 'alias dsm="bash $HOME/dsh-upgrade-toolkit/bin/dsh-manage.sh"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+挂上后，下文示例都可简写为 `dsm status` / `dsm update` / `dsm web` / `dsm doctor` …。
+
 ### 首次安装 DSH（一键双端）
 
 上面"安装"指的是**安装这套工具包**。如果你要在一台**还没装过 DSH** 的机器上从零装好 DSH（桌面壳 + web runtime），直接用 `install` 子命令，它会：
@@ -97,17 +109,17 @@ chmod +x dsh-upgrade-toolkit/bin/*.sh
 
 ```bash
 # 一键双端安装（壳 + runtime + pin + doctor）
-bin/dsh-manage.sh install
+dsm install
 # 指定 runtime 版本 / 只装一端 / 先预览
-bin/dsh-manage.sh install --runtime 0.1.1-rc.2
-bin/dsh-manage.sh install --no-shell        # 只引导 runtime（壳已手动装好）
-bin/dsh-manage.sh install --no-runtime       # 只装桌面壳
-bin/dsh-manage.sh install --dry-run          # 只报告将做什么，不改动
+dsm install --runtime 0.1.1-rc.2
+dsm install --no-shell        # 只引导 runtime（壳已手动装好）
+dsm install --no-runtime       # 只装桌面壳
+dsm install --dry-run          # 只报告将做什么，不改动
 ```
 
 > ⚠️ runtime 引导的目录布局依赖 DSH 上游约定，macOS 上已验证可用；换机器若 `doctor` 报 FAIL，按输出手动修正后重跑 `pin` 即可。`dsh web` 前请把 `export PATH="$HOME/.dsh/bin:$PATH"` 加入你的 shell rc（脚本安装完会提示）。
 
-**安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`install`（已装则跳过）/ `update`（升 runtime）/ `shell`（升壳）/ `web`（启动）/ `doctor`（自检）/ `rollback`（回滚）/ `scan`（升级前查兼容）/ `check`（定时报告）。一台机器只需 `install` 一次。
+**安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`dsm install`（已装则跳过）/ `dsm update`（升 runtime）/ `dsm shell`（升壳）/ `dsm web`（启动）/ `dsm doctor`（自检）/ `dsm rollback`（回滚）/ `dsm scan`（升级前查兼容）/ `dsm check`（定时报告）。一台机器只需 `dsm install` 一次。
 
 **健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、或 `dsh` 不在 PATH 时也不会崩溃**——版本探测失败只降级为 `?` / 优雅报告，不再中断。`doctor` 的软链校验是**版本无关**的：检查清单动态取自 runtime 中真实存在的 `@deepseek-ai` 包，app-only 包（runtime 中没有、本就该来自壳）不会误报。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`（不依赖 PATH、不被 stderr 吞），缺失时回退 `dsh --version`。
 
@@ -115,35 +127,35 @@ bin/dsh-manage.sh install --dry-run          # 只报告将做什么，不改动
 
 ```bash
 # 1) 首次 / 壳更新后：把 runtime 钉死为权威
-bin/pin-runtime.sh
+dsm pin
 
 # 2) 升级 runtime（交互确认 @next / @latest 各自版本）
-bin/dsh-manage.sh update
+dsm update
 # 或单步非交互升级到指定版本：
-bin/dsh-manage.sh update-runtime 0.1.1-rc.2
+dsm update-runtime 0.1.1-rc.2
 
 # 3) 升级桌面壳（dsh-manage.sh 自动从 DSH Desktop 的 GitHub Releases 下载 universal dmg，备份后替换）
-bin/dsh-manage.sh shell
+dsm shell
 
 # 4) 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截）
-bin/dsh-manage.sh web
+dsm web
 
 # 5) 校验 heal 后关键包仍指向 runtime
 node bin/verify-heal.mjs
 
 # 查看当前版本与可用更新
-bin/dsh-manage.sh status
+dsm status
 
 # 升级前先扫描已装 adapter 与 runtime 的兼容性（预测 @next/@latest 是否掉范围）
-bin/dsh-manage.sh scan
+dsm scan
 # 仅报告模式（可挂 crontab 每天自检，不改动任何东西）
-bin/dsh-manage.sh check --cron
+dsm check --cron
 # 自检当前环境（软链 / 备份 / 守卫 / 版本）
-bin/dsh-manage.sh doctor
+dsm doctor
 # 从最近的备份回滚：runtime / shell / all
-bin/dsh-manage.sh rollback runtime
+dsm rollback runtime
 # 升级前预览将变更的依赖树，不实际执行
-bin/dsh-manage.sh update --dry-run
+dsm update --dry-run
 ```
 
 ### 子命令一览
@@ -174,10 +186,10 @@ bin/dsh-manage.sh update --dry-run
 ## 故障排查
 
 ### `SAFE_DELETE_BULK_CONFIRM_REQUIRED` / pnpm 更新插件失败
-你在 WorkBuddy / CodeBuddy 终端里启动了 `dsh web`，宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 让 pnpm 清理临时目录（>50 文件）需确认但无法确认。**解法**：用 `dsh-manage.sh web` 启动，它会 `env -u` 卸载这些守卫变量（详见脚本注释）。
+你在 WorkBuddy / CodeBuddy 终端里启动了 `dsh web`，宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 让 pnpm 清理临时目录（>50 文件）需确认但无法确认。**解法**：用 `dsm web` 启动，它会 `env -u` 卸载这些守卫变量（详见脚本注释）。
 
 ### 壳更新后 runtime 被覆盖
-重跑 `bin/pin-runtime.sh` 重新钉死。`bundle-bak-<时间戳>/` 保留被替换的真实目录，可据此回滚到「壳自带版本」。
+重跑 `dsm pin` 重新钉死。`bundle-bak-<时间戳>/` 保留被替换的真实目录，可据此回滚到「壳自带版本」。
 
 ## 适用平台
 

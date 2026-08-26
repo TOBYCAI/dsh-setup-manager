@@ -32,7 +32,7 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 
 **How to read the table**:
 
-- The **DSH version** is the version of `@deepseek-ai/dsh` inside `~/.dsh/runtime` (check with `bin/dsh-manage.sh status`). The shell App version is a separate thing — the two are decoupled.
+- The **DSH version** is the version of `@deepseek-ai/dsh` inside `~/.dsh/runtime` (check with `dsm status`). The shell App version is a separate thing — the two are decoupled.
 - rc.2 **used to be** a breaking adapter interface change (every LLM adapter had to implement `prepareCall` and other new methods), but the popular plugin `@liustack/modlens` has fixed it natively since **≥ 3.23.x**; for any other old plugin, `bin/scan-adapters.mjs` surfaces the compatibility risk ahead of time.
 
 ## Architecture
@@ -85,6 +85,18 @@ Option 2: download the `dsh-upgrade-toolkit-src.zip` source package from [Releas
 
 Scripts adapt to your paths via `DSH_HOME` etc. — no hard-coded absolute paths.
 
+### Add the dsm shortcut alias (recommended)
+
+Add the line below to your shell rc (`~/.zshrc` or `~/.bashrc`) so every command can use `dsm` instead of `bin/dsh-manage.sh`:
+
+```bash
+# change the path to wherever you actually cloned / extracted the toolkit
+echo 'alias dsm="bash $HOME/dsh-upgrade-toolkit/bin/dsh-manage.sh"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Once set, the examples below shorten to `dsm status` / `dsm update` / `dsm web` / `dsm doctor` ….
+
 ### First-time DSH install (one-click, both ends)
 
 The "Install" above installs **this toolkit**. To set up DSH from scratch on a machine that has never had it (desktop shell + web runtime), use the `install` subcommand. It will:
@@ -95,17 +107,17 @@ The "Install" above installs **this toolkit**. To set up DSH from scratch on a m
 
 ```bash
 # One-click dual-end install (shell + runtime + pin + doctor)
-bin/dsh-manage.sh install
+dsm install
 # pin a runtime version / install only one end / preview first
-bin/dsh-manage.sh install --runtime 0.1.1-rc.2
-bin/dsh-manage.sh install --no-shell      # runtime only (shell already installed manually)
-bin/dsh-manage.sh install --no-runtime     # desktop shell only
-bin/dsh-manage.sh install --dry-run        # report what it would do, change nothing
+dsm install --runtime 0.1.1-rc.2
+dsm install --no-shell      # runtime only (shell already installed manually)
+dsm install --no-runtime     # desktop shell only
+dsm install --dry-run        # report what it would do, change nothing
 ```
 
 > ⚠️ The runtime bootstrap directory layout depends on DSH upstream conventions; it is verified on macOS. If `doctor` reports FAIL on another machine, fix per its output and re-run `pin`. Before `dsh web`, add `export PATH="$HOME/.dsh/bin:$PATH"` to your shell rc (the script reminds you after install).
 
-**After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `install` (skips if already installed) / `update` (runtime) / `shell` (shell) / `web` (launch) / `doctor` (self-check) / `rollback` / `scan` (pre-upgrade compat) / `check` (scheduled report). A machine only needs `install` once.
+**After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `dsm install` (skips if already installed) / `dsm update` (runtime) / `dsm shell` (shell) / `dsm web` (launch) / `dsm doctor` (self-check) / `dsm rollback` / `dsm scan` (pre-upgrade compat) / `dsm check` (scheduled report). A machine only needs `dsm install` once.
 
 **Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` **do not crash even when DSH is not yet installed or `dsh` is off PATH** — version probing degrades gracefully to `?` / a report instead of aborting. `doctor`'s symlink check is **version-agnostic**: the checklist is taken dynamically from the `@deepseek-ai` packages that actually exist in the runtime, so app-only packages (absent from runtime, correctly sourced from the shell) are never false-positive. The installed version is read from `~/.dsh/runtime/.../dsh/package.json` first (no PATH dependency, not swallowed by stderr), falling back to `dsh --version`.
 
@@ -113,35 +125,35 @@ bin/dsh-manage.sh install --dry-run        # report what it would do, change not
 
 ```bash
 # 1) First time / after a shell upgrade: pin runtime as authority
-bin/pin-runtime.sh
+dsm pin
 
 # 2) Upgrade runtime (interactively confirm @next / @latest)
-bin/dsh-manage.sh update
+dsm update
 # or non-interactively to a specific version:
-bin/dsh-manage.sh update-runtime 0.1.1-rc.2
+dsm update-runtime 0.1.1-rc.2
 
 # 3) Upgrade the desktop shell (dsh-manage.sh auto-downloads the universal dmg from DSH Desktop's GitHub Releases, backs up then replaces)
-bin/dsh-manage.sh shell
+dsm shell
 
 # 4) Launch web (auto-unloads safe-delete guard so pnpm isn't blocked)
-bin/dsh-manage.sh web
+dsm web
 
 # 5) Verify key packages still point to runtime after heal
 node bin/verify-heal.mjs
 
 # Show current versions and available updates
-bin/dsh-manage.sh status
+dsm status
 
 # Scan installed adapters vs runtime compatibility before upgrading (predicts if @next/@latest falls out of range)
-bin/dsh-manage.sh scan
+dsm scan
 # Report-only mode (wire into crontab for daily self-check; changes nothing)
-bin/dsh-manage.sh check --cron
+dsm check --cron
 # Self-check the current environment (symlinks / backups / guards / versions)
-bin/dsh-manage.sh doctor
+dsm doctor
 # Roll back from the most recent backup: runtime / shell / all
-bin/dsh-manage.sh rollback runtime
+dsm rollback runtime
 # Preview the dependency tree that would change, without executing
-bin/dsh-manage.sh update --dry-run
+dsm update --dry-run
 ```
 
 ### Subcommand reference
@@ -172,10 +184,10 @@ bin/dsh-manage.sh update --dry-run
 ## Troubleshooting
 
 ### `SAFE_DELETE_BULK_CONFIRM_REQUIRED` / pnpm plugin update fails
-You launched `dsh web` from a host terminal (WorkBuddy / CodeBuddy) whose injected `CODEBUDDY_SAFE_DELETE_*` makes pnpm's temp cleanup (>50 files) require confirmation that can't be given. **Fix**: launch via `dsh-manage.sh web`, which `env -u` unsets those guard vars (see script comments).
+You launched `dsh web` from a host terminal (WorkBuddy / CodeBuddy) whose injected `CODEBUDDY_SAFE_DELETE_*` makes pnpm's temp cleanup (>50 files) require confirmation that can't be given. **Fix**: launch via `dsm web`, which `env -u` unsets those guard vars (see script comments).
 
 ### Runtime overwritten after a shell upgrade
-Re-run `bin/pin-runtime.sh` to re-pin. `bundle-bak-<timestamp>/` keeps the replaced real dirs so you can roll back to the "shell-bundled version".
+Re-run `dsm pin` to re-pin. `bundle-bak-<timestamp>/` keeps the replaced real dirs so you can roll back to the "shell-bundled version".
 
 ## Platform support
 
