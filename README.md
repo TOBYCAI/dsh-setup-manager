@@ -204,4 +204,4 @@ dsm update --dry-run
 
 ## License
 
-[MIT](./LICENSE) © @TOBYCAI
+[MIT](./LICENSE) © TOBYCAI

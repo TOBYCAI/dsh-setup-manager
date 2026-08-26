@@ -204,4 +204,4 @@ Re-run `dsm pin` to re-pin. `bundle-bak-<timestamp>/` keeps the replaced real di
 
 ## License
 
-[MIT](./LICENSE) © @TOBYCAI
+[MIT](./LICENSE) © TOBYCAI
