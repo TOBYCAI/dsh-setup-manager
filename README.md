@@ -75,17 +75,22 @@ dsh-upgrade-toolkit/
 
 ## 安装
 
+两种方式都会得到一个 `dsh-upgrade-toolkit/` 目录（内含 `bin/dsh-manage.sh`）。clone 或解压到任意位置均可。
+
 ```bash
 # 方式一：git clone（推荐）
 git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
-# 或把本目录放到任意位置，例如：
-#   ~/Downloads/DSH_dev/published/dsh-upgrade-toolkit
-chmod +x dsh-upgrade-toolkit/bin/*.sh
+cd dsh-upgrade-toolkit
+chmod +x bin/*.sh
+
+# 方式二：从 Releases 下载源码包（解压后同样是 dsh-upgrade-toolkit/ 目录）
+# 在 https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases 下载 dsh-upgrade-toolkit-src.zip
+unzip dsh-upgrade-toolkit-src.zip
+cd dsh-upgrade-toolkit
+chmod +x bin/*.sh
 ```
 
-方式二：从 [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) 下载 `dsh-upgrade-toolkit-src.zip` 源码包，解压即可。
-
-脚本通过 `DSH_HOME` 等环境变量适配你的实际路径，无需硬编码。
+脚本通过 `DSH_HOME` 等环境变量适配你的实际路径，无需硬编码；下文别名把路径换成你实际 clone / 解压的位置即可。
 
 ### 挂上 dsm 快捷别名（推荐）
 

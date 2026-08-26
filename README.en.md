@@ -75,15 +75,22 @@ dsh-upgrade-toolkit/
 
 ## Install
 
+Both options yield a `dsh-upgrade-toolkit/` directory (containing `bin/dsh-manage.sh`). You can clone or extract it anywhere.
+
 ```bash
 # Option 1: git clone (recommended)
 git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
-chmod +x dsh-upgrade-toolkit/bin/*.sh
+cd dsh-upgrade-toolkit
+chmod +x bin/*.sh
+
+# Option 2: download the source package from Releases (also extracts to dsh-upgrade-toolkit/)
+# download dsh-upgrade-toolkit-src.zip from https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases
+unzip dsh-upgrade-toolkit-src.zip
+cd dsh-upgrade-toolkit
+chmod +x bin/*.sh
 ```
 
-Option 2: download the `dsh-upgrade-toolkit-src.zip` source package from [Releases](https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases) and extract it.
-
-Scripts adapt to your paths via `DSH_HOME` etc. — no hard-coded absolute paths.
+Scripts adapt to your paths via `DSH_HOME` etc. — no hard-coded absolute paths; in the alias below, change the path to wherever you actually cloned / extracted the toolkit.
 
 ### Add the dsm shortcut alias (recommended)
 
