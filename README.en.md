@@ -1,14 +1,20 @@
-# dsh-upgrade-toolkit
+# dsh-setup-manager
 
 > 中文 | English
 
-![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-upgrade-toolkit?style=flat-square&color=facc15)
-![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
+![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-setup-manager?style=flat-square&color=facc15)
+![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-setup-manager/total?style=flat-square&color=14b8a6)
 ![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
-![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-upgrade-toolkit/compat.yml?branch=main&label=daily-compat&style=flat-square)
+![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-setup-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
-One-command management for upgrading **DeepSeek Harness (DSH)**'s "shared install (runtime)" and "desktop shell", and fixing the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard).
+**One-stop install, upgrade, and maintenance for DeepSeek Harness (DSH)** — the desktop shell and web share a single `~/.dsh/runtime` engine, so one upgrade updates both ends, and the desktop opens with the latest plugins for the current runtime. This toolkit codifies that "single-engine, dual-end" model into reusable scripts, and fixes the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard).
+
+> **The ideal state this toolkit guarantees**
+> - Single engine for both ends: the desktop shell and web both symlink to the same `~/.dsh/runtime` — no two independent copies.
+> - One upgrade, both ends in sync: `dsm update` upgrades the runtime, and the desktop and web pick it up together.
+> - Desktop stays current: the plugin profile is shared across both ends via `~/.dsh/profiles`, so the desktop opens with the latest plugins for the current runtime.
+> - Shell upgrades can't break it: `dsm doctor` verifies, and `dsm pin` fixes it in one command if something drifts.
 
 ## Why this exists
 
@@ -61,7 +67,7 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 ## File layout
 
 ```
-dsh-upgrade-toolkit/
+dsh-setup-manager/
 ├── README.md / README.en.md
 ├── LICENSE                    # MIT
 ├── .gitignore
@@ -75,18 +81,18 @@ dsh-upgrade-toolkit/
 
 ## Install
 
-Both options yield a `dsh-upgrade-toolkit/` directory (containing `bin/dsh-manage.sh`). You can clone or extract it anywhere.
+Both options yield a `dsh-setup-manager/` directory (containing `bin/dsh-manage.sh`). You can clone or extract it anywhere.
 
 ```bash
 # Option 1: git clone (recommended)
-git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
-cd dsh-upgrade-toolkit
+git clone https://github.com/TOBYCAI/dsh-setup-manager.git
+cd dsh-setup-manager
 chmod +x bin/*.sh
 
-# Option 2: download the source package from Releases (also extracts to dsh-upgrade-toolkit/)
-# download dsh-upgrade-toolkit-src.zip from https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases
-unzip dsh-upgrade-toolkit-src.zip
-cd dsh-upgrade-toolkit
+# Option 2: download the source package from Releases (also extracts to dsh-setup-manager/)
+# download dsh-setup-manager-src.zip from https://github.com/TOBYCAI/dsh-setup-manager/releases
+unzip dsh-setup-manager-src.zip
+cd dsh-setup-manager
 chmod +x bin/*.sh
 ```
 
@@ -98,7 +104,7 @@ Add the line below to your shell rc (`~/.zshrc` or `~/.bashrc`) so every command
 
 ```bash
 # change the path to wherever you actually cloned / extracted the toolkit
-echo 'alias dsm="bash $HOME/dsh-upgrade-toolkit/bin/dsh-manage.sh"' >> ~/.zshrc
+echo 'alias dsm="bash $HOME/dsh-setup-manager/bin/dsh-manage.sh"' >> ~/.zshrc
 source ~/.zshrc
 ```
 

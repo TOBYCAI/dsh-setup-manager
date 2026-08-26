@@ -1,14 +1,20 @@
-# dsh-upgrade-toolkit
+# dsh-setup-manager
 
 > 中文 | [English](./README.en.md)
 
-![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-upgrade-toolkit?style=flat-square&color=facc15)
-![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-upgrade-toolkit/total?style=flat-square&color=14b8a6)
+![GitHub stars](https://img.shields.io/github/stars/TOBYCAI/dsh-setup-manager?style=flat-square&color=facc15)
+![Downloads](https://img.shields.io/github/downloads/TOBYCAI/dsh-setup-manager/total?style=flat-square&color=14b8a6)
 ![License](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)
-![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-upgrade-toolkit/compat.yml?branch=main&label=daily-compat&style=flat-square)
+![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-setup-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
-一键管理 **DeepSeek Harness（DSH）** 的「共享安装（runtime）」与「桌面壳」的升级，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截）。
+**一站式安装、升级与维护 DeepSeek Harness（DSH）**——桌面壳与 web 共用同一个 `~/.dsh/runtime` 引擎，一次升级两端同时生效，桌面打开即是当前 runtime 的最新插件。本工具把这套「单引擎双端」模型固化成可复用脚本，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截）。
+
+> **本工具保证的理想状态**
+> - 双端单引擎：桌面壳与 web 都软链到同一个 `~/.dsh/runtime`，不存在两份独立副本。
+> - 一次升级、两端同步：`dsm update` 升的是 runtime，桌面与 web 同时生效。
+> - 桌面即最新：插件 profile 两端共用 `~/.dsh/profiles`，打开桌面就是当前 runtime 的最新插件。
+> - 壳更新不破防：`dsm doctor` 检验，出问题 `dsm pin` 一条命令修回。
 
 ## 为什么需要它
 
@@ -61,7 +67,7 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 ## 文件结构
 
 ```
-dsh-upgrade-toolkit/
+dsh-setup-manager/
 ├── README.md / README.en.md
 ├── LICENSE                    # MIT
 ├── .gitignore
@@ -75,18 +81,18 @@ dsh-upgrade-toolkit/
 
 ## 安装
 
-两种方式都会得到一个 `dsh-upgrade-toolkit/` 目录（内含 `bin/dsh-manage.sh`）。clone 或解压到任意位置均可。
+两种方式都会得到一个 `dsh-setup-manager/` 目录（内含 `bin/dsh-manage.sh`）。clone 或解压到任意位置均可。
 
 ```bash
 # 方式一：git clone（推荐）
-git clone https://github.com/TOBYCAI/dsh-upgrade-toolkit.git
-cd dsh-upgrade-toolkit
+git clone https://github.com/TOBYCAI/dsh-setup-manager.git
+cd dsh-setup-manager
 chmod +x bin/*.sh
 
-# 方式二：从 Releases 下载源码包（解压后同样是 dsh-upgrade-toolkit/ 目录）
-# 在 https://github.com/TOBYCAI/dsh-upgrade-toolkit/releases 下载 dsh-upgrade-toolkit-src.zip
-unzip dsh-upgrade-toolkit-src.zip
-cd dsh-upgrade-toolkit
+# 方式二：从 Releases 下载源码包（解压后同样是 dsh-setup-manager/ 目录）
+# 在 https://github.com/TOBYCAI/dsh-setup-manager/releases 下载 dsh-setup-manager-src.zip
+unzip dsh-setup-manager-src.zip
+cd dsh-setup-manager
 chmod +x bin/*.sh
 ```
 
@@ -98,7 +104,7 @@ chmod +x bin/*.sh
 
 ```bash
 # 把路径换成你实际 clone / 解压 toolkit 的位置
-echo 'alias dsm="bash $HOME/dsh-upgrade-toolkit/bin/dsh-manage.sh"' >> ~/.zshrc
+echo 'alias dsm="bash $HOME/dsh-setup-manager/bin/dsh-manage.sh"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
