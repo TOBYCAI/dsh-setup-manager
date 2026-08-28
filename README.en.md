@@ -130,9 +130,9 @@ dsm install --dry-run        # report what it would do, change nothing
 
 > ⚠️ The runtime bootstrap directory layout depends on DSH upstream conventions; it is verified on macOS. If `doctor` reports FAIL on another machine, fix per its output and re-run `pin`. Before `dsh web`, add `export PATH="$HOME/.dsh/bin:$PATH"` to your shell rc (the script reminds you after install).
 
-**After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `dsm install` (skips if already installed) / `dsm update` (runtime) / `dsm shell` (shell) / `dsm web` (launch) / `dsm doctor` (self-check) / `dsm rollback` / `dsm scan` (pre-upgrade compat) / `dsm check` (scheduled report). A machine only needs `dsm install` once.
+**After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `dsm install` (skips if already installed) / `dsm update` (runtime) / `dsm shell` (shell) / `dsm web` (launch) / `dsm doctor` (self-check) / `dsm rollback` / `dsm cleanup` (clear backups) / `dsm scan` (pre-upgrade compat) / `dsm check` (scheduled report). A machine only needs `dsm install` once.
 
-**Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` **do not crash even when DSH is not yet installed or `dsh` is off PATH** — version probing degrades gracefully to `?` / a report instead of aborting. `doctor`'s symlink check is **version-agnostic**: the checklist is taken dynamically from the `@deepseek-ai` packages that actually exist in the runtime, so app-only packages (absent from runtime, correctly sourced from the shell) are never false-positive. The installed version is read from `~/.dsh/runtime/.../dsh/package.json` first (no PATH dependency, not swallowed by stderr), falling back to `dsh --version`.
+**Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` **do not crash even when DSH is not yet installed or `dsh` is off PATH** — version probing degrades gracefully to an "unknown" marker / a report instead of aborting. `doctor`'s symlink check is **version-agnostic**: the checklist is taken dynamically from the `@deepseek-ai` packages that actually exist in the runtime, so app-only packages (absent from runtime, correctly sourced from the shell) are never false-positive. The installed version is read from `~/.dsh/runtime/.../dsh/package.json` first (no PATH dependency, not swallowed by stderr), falling back to `dsh --version`.
 
 ## Usage
 
@@ -165,6 +165,9 @@ dsm check --cron
 dsm doctor
 # Roll back from the most recent backup: runtime / shell / all
 dsm rollback runtime
+# Interactively clean up backups (lists bundle-bak-*/shell-bak-*, choose what to delete / keep; --dry-run just lists)
+dsm cleanup
+dsm cleanup --dry-run
 # Preview the dependency tree that would change, without executing
 dsm update --dry-run
 ```
@@ -181,8 +184,9 @@ dsm update --dry-run
 | `web` | Launch web (auto-unload safe-delete guard so pnpm isn't blocked) | launches process |
 | `scan` | Scan installed LLM adapters vs runtime dsh version semver range | read-only |
 | `check [--cron]` | Report-only self-check (wire into a scheduled task) | read-only |
-| `doctor` | Self-check symlink targets / backup dirs / guards / versions | read-only |
+| `doctor` | Self-check symlink targets / backup dirs / guards / versions (backups listed with real path + size) | read-only |
 | `rollback [runtime\|shell\|all]` | Restore from `bundle-bak-*` / `shell-bak-*` | write |
+| `cleanup [--dry-run]` | Interactively clear backups: lists them (type/version/date/size/path), choose delete or keep | write (dry-run: read-only) |
 
 ### Environment variables
 

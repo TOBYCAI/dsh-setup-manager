@@ -29,6 +29,7 @@
 #   dsh-manage.sh scan                        扫描已装 LLM adapter 与当前 runtime 的版本兼容性
 #   dsh-manage.sh check [--cron]             健康检查 + 更新可用性（默认仅报告，不自动改）
 #   dsh-manage.sh rollback [runtime|shell|all]  从备份还原（交互确认）
+#   dsh-manage.sh cleanup [--dry-run]           交互式清理备份（选择删除 / 保留）
 #   dsh-manage.sh install [--runtime <ver>] [--no-shell] [--no-runtime] [--dry-run]
 #                                    一键双端安装：下载安装桌面壳 + 引导 runtime + 自动 pin + doctor
 #
@@ -122,7 +123,7 @@ _dsh_do_upgrade() {
   local wanted="$1" base pnpm
   [ -z "$wanted" ] && { echo "✗ 未指定版本" >&2; return 1; }
   if ! npm view "@deepseek-ai/dsh@$wanted" version >/dev/null 2>&1; then
-    echo "✗ registry 找不到 @deepseek-ai/dsh@$wanted，跳过（版本未发布或拼写错误）。"
+    echo "✗ registry 找不到 @deepseek-ai/dsh@${wanted}，跳过（版本未发布或拼写错误）。"
     return 1
   fi
   local link; link="$(readlink "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh" 2>/dev/null || true)"
@@ -139,13 +140,13 @@ _dsh_do_upgrade() {
       && npm install --save-exact "@deepseek-ai/dsh@$wanted" --no-audit --no-fund --ignore-scripts )
   fi
   local rc=$?
-  if [ $rc -ne 0 ]; then echo "✗ 升级失败（退出 $rc），当前安装未改动。"; return 1; fi
+  if [ $rc -ne 0 ]; then echo "✗ 升级失败（退出 ${rc}），当前安装未改动。"; return 1; fi
   local got; got="$(dsh --version 2>/dev/null | head -n1)"
   if [ "$got" != "$wanted" ]; then
-    echo "⚠ 升级后版本=$got（期望 $wanted）。可重跑 dsh-manage.sh pin 重新钉死。"
+    echo "⚠ 升级后版本=${got}（期望 ${wanted}）。可重跑 dsh-manage.sh pin 重新钉死。"
     return 1
   fi
-  echo "✓ 完成 → $got（重新钉死壳链接…）"
+  echo "✓ 完成 → ${got}（重新钉死壳链接…）"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
   return 0
 }
@@ -206,7 +207,7 @@ _dsh_shell_upgrade_macos() {
   xattr -dr com.apple.quarantine "$DSH_APP" 2>/dev/null || true
   hdiutil detach "$mnt" >/dev/null 2>&1; rm -f "$dmg"
   echo "→ 重新钉死 runtime 链接…"; zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
-  echo "✓ 壳已升级到 $tag（旧版备份在 $bak）"
+  echo "✓ 壳已升级到 ${tag}（旧版备份在 ${bak}）"
 }
 
 # Linux：下载 AppImage / tar 包 → 备份 /Applications 等价目录 → 解压替换。
@@ -226,7 +227,7 @@ _dsh_shell_upgrade_linux() {
   esac
   rm -rf "$tmp"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
-  echo "✓ 壳已升级到 $tag（Linux 路径：$dest；旧版备份在 $bak）"
+  echo "✓ 壳已升级到 ${tag}（Linux 路径：${dest}；旧版备份在 ${bak}）"
 }
 
 # Windows：下载 exe 安装包 → 静默运行安装（/S）。
@@ -239,7 +240,7 @@ _dsh_shell_upgrade_windows() {
   echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$exe" "$url" || { echo "✗ 下载失败"; return 1; }
   echo "→ 静默安装（/S）…"; "$exe" //S || { echo "✗ 安装失败"; return 1; }
   rm -f "$exe"
-  echo "✓ 壳已升级到 $tag（旧版备份在 $bak）"
+  echo "✓ 壳已升级到 ${tag}（旧版备份在 ${bak}）"
 }
 
 # ---- 启动 web（卸载 safe-delete 守卫）----
@@ -310,20 +311,27 @@ _dsh_doctor() {
       rp2="$(readlink "$l" 2>/dev/null || true)"
       realp="$(_dsh_realpath "$l" 2>/dev/null || true)"
       if [[ "$realp" != "$DSH_HOME/runtime"* ]]; then
-        echo "  [WARN] $l -> $rp2（未指向 runtime）"; fail=1
+        echo "  [WARN] $l -> ${rp2}（未指向 runtime）"; fail=1
       fi
     done
   fi
-  # 3) 残余备份目录
-  local nbak; nbak="$(find "$DSH_HOME" -maxdepth 1 -type d \( -name 'bundle-bak-*' -o -name 'shell-bak-*' \) 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$nbak" -gt 0 ] && echo "  [INFO] 发现 $nbak 个备份目录（bundle-bak-*/shell-bak-*），可用 rollback 还原"
+  # 3) 备份目录（列出真实路径 + 大小，可用 cleanup 清理 / rollback 还原）
+  local bakrows btype bver bts bsize bpath nbak
+  bakrows="$(_dsh_backup_list)"
+  if [ -n "$bakrows" ]; then
+    nbak="$(printf '%s\n' "$bakrows" | wc -l | tr -d ' ')"
+    echo "  [INFO] 备份目录共 $nbak 个（可用 cleanup 清理 / rollback 还原）："
+    printf '%s\n' "$bakrows" | while IFS=$'\t' read -r btype bver bts bsize bpath; do
+      [ -n "$bpath" ] && echo "      - ${bpath}（$btype ${bver}，$(_dsh_ts_fmt "$bts")，${bsize}）"
+    done
+  fi
   # 4) 当前 shell 是否仍导出 safe-delete 守卫（web 启动会自动卸载，仅提示）
   local gv; gv="$(env | cut -d= -f1 | grep -E '^CODEBUDDY_SAFE_DELETE|^SAFE_DELETE_BULK' 2>/dev/null | tr '\n' ' ')"
-  [ -n "$gv" ] && echo "  [INFO] 当前 shell 导出了守卫变量: $gv（web 启动时会自动 unset）"
+  [ -n "$gv" ] && echo "  [INFO] 当前 shell 导出了守卫变量: ${gv}（web 启动时会自动 unset）"
   # 5) 版本与更新可用性
   _dsh_check_update; _dsh_shell_check
-  echo "  runtime: ${_DSH_INST:-?}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
-  echo "  壳:     ${_DSH_SHELL_CUR:-?}（最新=${_DSH_SHELL_LATEST:-无}）"
+  echo "  runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
+  echo "  壳:     ${_DSH_SHELL_CUR:-未知}（最新=${_DSH_SHELL_LATEST:-无}）"
   [ -n "${_DSH_NEXT:-}${_DSH_LATEST:-}" ] && { [ "$_DSH_INST" != "$_DSH_NEXT" ] || [ "$_DSH_INST" != "$_DSH_LATEST" ]; } \
     && echo "  [INFO] runtime 有可用更新"
   echo "=== 自检完成: $([ $fail -eq 0 ] && echo '无致命问题 ✅' || echo '存在 FAIL，请处理 ❌') ==="
@@ -356,13 +364,103 @@ _dsh_rollback() {
   if [ "$what" = "shell" ] || [ "$what" = "all" ]; then
     local sbak; sbak="$(find "$DSH_HOME" -maxdepth 1 -type d -name 'shell-bak-*' 2>/dev/null | sort | tail -1)"
     if [ -z "$sbak" ]; then echo "✗ 未找到 shell-bak-* 备份，无法回滚壳。"; else
-      echo "将把壳还原为 $sbak（当前壳会被覆盖）。"
+      echo "将把壳还原为 ${sbak}（当前壳会被覆盖）。"
       _dsh_confirm "确认回滚壳? [y/N] " || { echo "已取消。"; return 1; }
       if pgrep -f "DSH Desktop" >/dev/null 2>&1; then osascript -e 'quit app "DSH Desktop"' 2>/dev/null || true; sleep 2; fi
       rm -rf "$DSH_APP"; cp -R "$sbak" "$DSH_APP"
-      echo "✓ 壳已回滚到 $sbak。"
+      echo "✓ 壳已回滚到 ${sbak}。"
     fi
   fi
+}
+
+# ---- 备份时间戳格式化（macOS / Linux 通用）----
+_dsh_ts_fmt() {
+  local t="$1"
+  date -j -f "%Y%m%d%H%M%S" "$t" "+%Y-%m-%d %H:%M" 2>/dev/null && return
+  date -d "$t" "+%Y-%m-%d %H:%M" 2>/dev/null && return
+  printf '%s' "$t"
+}
+
+# ---- 列出备份（bundle-bak-* / shell-bak-*），每行：类型<TAB>版本<TAB>时间戳<TAB>大小<TAB>路径 ----
+_dsh_backup_list() {
+  local d name type ver ts
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    type="runtime pin"; ver="-"; ts=""
+    case "$name" in
+      shell-bak-*)
+        type="壳"
+        ver="${name#shell-bak-}"; ver="${ver%-*}"   # shell-bak-2.0.2-20260828133548 -> 2.0.2
+        ts="${name##*-}"
+        ;;
+      bundle-bak-*)
+        type="runtime pin"
+        ts="${name#bundle-bak-}"
+        ;;
+    esac
+    printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$ver" "$ts" "$(du -sh "$d" 2>/dev/null | awk '{print $1}')" "$d"
+  done < <(find "$DSH_HOME" -maxdepth 1 -type d \( -name 'bundle-bak-*' -o -name 'shell-bak-*' \) 2>/dev/null | sort)
+}
+
+# ---- 清理备份（交互式选择删除 / 保留）----
+_dsh_cleanup() {
+  local dry=0
+  [ "${1:-}" = "--dry-run" ] && dry=1
+  local items=() i=0 type ver ts size path line
+  while IFS=$'\t' read -r type ver ts size path; do
+    [ -n "$path" ] || continue
+    items+=("$type|$ver|$ts|$size|$path")
+  done < <(_dsh_backup_list)
+  if [ ${#items[@]} -eq 0 ]; then
+    echo "✓ 没有找到任何备份（bundle-bak-*/shell-bak-*），无需清理。"
+    return 0
+  fi
+  echo "=== DSH 备份清理 ==="
+  echo "共 ${#items[@]} 个备份（删除后对应版本无法再 rollback）："
+  for line in "${items[@]}"; do
+    i=$((i+1))
+    IFS='|' read -r type ver ts size path <<< "$line"
+    printf '  [%2d] %-10s | 版本 %-9s | %s | %s\n        %s\n' "$i" "$type" "$ver" "$(_dsh_ts_fmt "$ts")" "$size" "$path"
+  done
+  if [ $dry -eq 1 ]; then echo "ℹ --dry-run：仅列出，未删除任何备份。"; return 0; fi
+  [ -t 0 ] || { echo "✗ 非交互环境，请在终端中运行 cleanup（可用 --dry-run 仅查看）。"; return 1; }
+  printf '输入要删除的备份编号（空格/逗号分隔；回车=全部保留；all=全部删除）：'
+  IFS= read -r sel || return 1
+  sel="$(printf '%s' "$sel" | tr ',' ' ' | tr -s ' ')"
+  [ -z "$sel" ] && { echo "✓ 未选择任何备份，全部保留。"; return 0; }
+  # 解析编号（去重 + 越界校验）
+  local dels=() n seen=""
+  if [ "$sel" = "all" ]; then
+    i=0; for line in "${items[@]}"; do i=$((i+1)); dels+=("$i"); done
+  else
+    for n in $sel; do
+      case "$n" in ''|*[!0-9]*) echo "⚠ 忽略无效输入: $n"; continue ;; esac
+      if [ "$n" -lt 1 ] || [ "$n" -gt "${#items[@]}" ]; then echo "⚠ 编号越界（1-${#items[@]}）: $n"; continue; fi
+      case "$seen" in *"|$n|"*) continue ;; esac; seen="$seen|$n|"; dels+=("$n")
+    done
+  fi
+  [ ${#dels[@]} -eq 0 ] && { echo "✓ 未选择有效编号，全部保留。"; return 0; }
+  echo "将删除 ${#dels[@]} 个备份："
+  for n in "${dels[@]}"; do
+    line="${items[$((n-1))]}"
+    IFS='|' read -r type ver ts size path <<< "$line"
+    echo "  ✗ $path"
+  done
+  _dsh_confirm "确认删除? [y/N] " || { echo "已取消，未删除任何备份。"; return 1; }
+  for n in "${dels[@]}"; do
+    line="${items[$((n-1))]}"
+    IFS='|' read -r type ver ts size path <<< "$line"
+    if rm -rf "$path" 2>/dev/null; then echo "  ✓ 已删除 $path"; else echo "  ✗ 删除失败 $path"; fi
+  done
+  echo "--- 剩余备份 ---"
+  local rest; rest="$(_dsh_backup_list)"
+  if [ -n "$rest" ]; then
+    printf '%s\n' "$rest" | while IFS=$'\t' read -r t v s2 sz p; do echo "  $p"; done
+  else
+    echo "  （无备份）"
+  fi
+  echo "✓ 清理完成。"
 }
 
 # ---- 引导 runtime（web 端首次安装）----
@@ -388,7 +486,7 @@ _dsh_bootstrap_runtime() {
     ( cd "$DSH_HOME/runtime" && npm install --no-audit --no-fund --ignore-scripts )
   fi
   local rc=$?
-  [ $rc -ne 0 ] && { echo "✗ runtime 引导失败（退出 $rc），未改动其他内容。"; return 1; }
+  [ $rc -ne 0 ] && { echo "✗ runtime 引导失败（退出 ${rc}），未改动其他内容。"; return 1; }
   echo "✓ runtime 引导完成 → $ver"
   # 确保 dsh 在 PATH：建 ~/.dsh/bin/dsh 软链（指向 runtime 内的 bin）
   binjs="$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js"
@@ -398,7 +496,7 @@ _dsh_bootstrap_runtime() {
     echo "→ 已创建 $DSH_HOME/bin/dsh 软链。请把下面这行加入你的 shell rc（如 ~/.zshrc）："
     echo "    export PATH=\"$DSH_HOME/bin:\$PATH\""
   else
-    echo "⚠ 未找到 runtime 内的 dsh 入口（$binjs），dsh web 前请手动确保 dsh 在 PATH。"
+    echo "⚠ 未找到 runtime 内的 dsh 入口（${binjs}），dsh web 前请手动确保 dsh 在 PATH。"
   fi
   return 0
 }
@@ -409,7 +507,7 @@ _dsh_shell_install() {
   [ -z "$url" ] && { echo "✗ 找不到壳下载地址，请手动从 GitHub Releases 安装 DSH Desktop。"; return 1; }
   case "$(_dsh_os)" in
     macos)
-      if [ -d "$DSH_APP" ]; then echo "→ 壳已安装在 $DSH_APP，跳过（如需升级用 shell）。"; return 0; fi
+      if [ -d "$DSH_APP" ]; then echo "→ 壳已安装在 ${DSH_APP}，跳过（如需升级用 shell）。"; return 0; fi
       _dsh_shell_install_macos "$@" ;;
     linux)   _dsh_shell_install_linux "$@" ;;
     windows) _dsh_shell_install_windows "$@" ;;
@@ -432,7 +530,7 @@ _dsh_shell_install_macos() {
 _dsh_shell_install_linux() {
   local cur="$1" url="$2" tag="$3" dest tmp
   dest="${DSH_APP:-$DSH_HOME/shell}"
-  [ -e "$dest" ] && { echo "→ 壳已存在于 $dest，跳过（如需升级用 shell）。"; return 0; }
+  [ -e "$dest" ] && { echo "→ 壳已存在于 ${dest}，跳过（如需升级用 shell）。"; return 0; }
   tmp="/tmp/DSH.Desktop-$tag"; rm -rf "$tmp"; mkdir -p "$tmp"
   echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$tmp/asset" "$url" || { echo "✗ 下载失败"; return 1; }
   mkdir -p "$dest"
@@ -442,16 +540,16 @@ _dsh_shell_install_linux() {
     *) echo "✗ 不支持的 Linux 壳格式: $url"; return 1 ;;
   esac
   rm -rf "$tmp"
-  echo "✓ 壳已安装（Linux 路径：$dest）"
+  echo "✓ 壳已安装（Linux 路径：${dest}）"
 }
 _dsh_shell_install_windows() {
   local cur="$1" url="$2" tag="$3" exe
   exe="/tmp/DSH.Desktop-$tag.exe"
-  [ -e "$DSH_APP" ] && { echo "→ 壳已存在于 $DSH_APP，跳过（如需升级用 shell）。"; return 0; }
+  [ -e "$DSH_APP" ] && { echo "→ 壳已存在于 ${DSH_APP}，跳过（如需升级用 shell）。"; return 0; }
   echo "→ 下载壳 ($url)"; curl -L --max-time 600 -o "$exe" "$url" || { echo "✗ 下载失败"; return 1; }
   echo "→ 静默安装（/S）…"; "$exe" //S || { echo "✗ 安装失败"; return 1; }
   rm -f "$exe"
-  echo "✓ 壳已安装（Windows 路径：$DSH_APP）"
+  echo "✓ 壳已安装（Windows 路径：${DSH_APP}）"
 }
 
 # ---- install：一键双端安装（壳 + runtime 引导 + pin + doctor）----
@@ -469,7 +567,7 @@ _dsh_install() {
   _dsh_shell_check
   if [ $dry -eq 1 ]; then
     echo "ℹ install --dry-run（不做任何改动）："
-    [ $doshell -eq 1 ] && echo "    桌面壳: 将安装 ${_DSH_SHELL_LATEST:-?}（来源 ${_DSH_SHELL_URL:-无}）"
+    [ $doshell -eq 1 ] && echo "    桌面壳: 将安装 ${_DSH_SHELL_LATEST:-未知}（来源 ${_DSH_SHELL_URL:-无}）"
     [ $dort -eq 1 ] && echo "    runtime: 将引导 @deepseek-ai/dsh@${rtver:-latest}"
     [ $doshell -eq 0 ] && echo "    桌面壳: 跳过（--no-shell）"
     [ $dort -eq 0 ] && echo "    runtime: 跳过（--no-runtime）"
@@ -499,12 +597,12 @@ case "$cmd" in
     _dsh_check_update
     if [ "${1:-}" = "--dry-run" ]; then
       if [ -z "${_DSH_NEXT:-}${_DSH_LATEST:-}" ]; then
-        echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-?}"
+        echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-未知}"
       else
-        inst="${_DSH_INST:-?}"
+        inst="${_DSH_INST:-未知}"
         for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
           [ -z "$v" ] && continue; [ "$v" = "$inst" ] && continue
-          echo "→ 若升级 runtime 到 $v（当前 $inst）："
+          echo "→ 若升级 runtime 到 ${v}（当前 ${inst}）："
           deps="$(npm view "@deepseek-ai/dsh@$v" dependencies --json 2>/dev/null)"
           echo "    依赖变更："
           printf '%s\n' "$deps" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const ks=Object.keys(o);console.log(ks.length?ks.map(k=>"      - "+k+"@"+o[k]).join("\n"):"      (无可列依赖)")}catch(e){console.log("      (无法解析依赖)")}})'
@@ -513,14 +611,14 @@ case "$cmd" in
       fi
     else
       if [ -z "${_DSH_NEXT:-}${_DSH_LATEST:-}" ]; then
-        echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-?}"
+        echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-未知}"
       else
         cands=(); seen=""; for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
           [ -z "$v" ] && continue; [ "$v" = "$_DSH_INST" ] && continue
           case "$seen" in *"|$v|"*) continue;; esac; seen="$seen|$v|"; cands+=("$v")
         done
-        if [ ${#cands[@]} -eq 0 ]; then echo "✓ runtime 已是最新（$_DSH_INST）。"
-        elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 $_DSH_INST；可用: ${cands[*]}）。"
+        if [ ${#cands[@]} -eq 0 ]; then echo "✓ runtime 已是最新（${_DSH_INST}）。"
+        elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 ${_DSH_INST}；可用: ${cands[*]}）。"
         else for v in "${cands[@]}"; do
           if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then _dsh_do_upgrade "$v" || echo "⚠ $v 失败"; else echo "  跳过 $v"; fi
         done; fi
@@ -532,7 +630,7 @@ case "$cmd" in
     ;;
   shell)
     _dsh_shell_check
-    echo "壳 当前: ${_DSH_SHELL_CUR:-?} ｜ 最新: ${_DSH_SHELL_LATEST:-未知}"
+    echo "壳 当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-未知}"
     if [ -z "${_DSH_SHELL_LATEST:-}" ] || [ "$_DSH_SHELL_LATEST" = "$_DSH_SHELL_CUR" ]; then
       echo "✓ 壳已是最新。"
     elif [ -t 0 ]; then
@@ -556,19 +654,20 @@ case "$cmd" in
       echo "dsh-check $(date -u +%FT%TZ) runtime=$_DSH_INST shell=$_DSH_SHELL_CUR updates=${upd:-none}"
     else
       echo "=== 健康检查 (check) ==="
-      echo "runtime: ${_DSH_INST:-?}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
-      echo "壳:     ${_DSH_SHELL_CUR:-?}（最新=${_DSH_SHELL_LATEST:-无}）"
+      echo "runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
+      echo "壳:     ${_DSH_SHELL_CUR:-未知}（最新=${_DSH_SHELL_LATEST:-无}）"
       echo "更新可用: ${upd:-无}"
       echo "--- 自检 ---"
       _dsh_doctor || true
     fi
     ;;
   rollback) _dsh_rollback "${1:-runtime}" ;;
+  cleanup) _dsh_cleanup "$@" ;;
   install) _dsh_install "$@" ;;
   status)
     _dsh_check_update; _dsh_shell_check
-    echo "runtime 当前: ${_DSH_INST:-?} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
-    echo "壳     当前: ${_DSH_SHELL_CUR:-?} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
+    echo "runtime 当前: ${_DSH_INST:-未知} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
+    echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
     ;;
-  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]}" >&2; exit 1 ;;
+  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
 esac

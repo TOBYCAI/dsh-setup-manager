@@ -43,7 +43,7 @@ elif [ -d "/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/no
 else
   # 非 macOS 或未安装壳：用一个影子目录，保证 profiles 链接依然钉到 runtime
   APP="$DSH_HOME/_app-shadow/node_modules/@deepseek-ai"
-  echo "⚠ 未检测到 DSH Desktop.app，使用影子目录 $APP（壳更新后请重新指定 DSH_APP_PKG）。"
+  echo "⚠ 未检测到 DSH Desktop.app，使用影子目录 ${APP}（壳更新后请重新指定 DSH_APP_PKG）。"
 fi
 
 PROF="$DSH_HOME/profiles/node_modules/@deepseek-ai"
@@ -54,6 +54,7 @@ BAK="$DSH_HOME/bundle-bak-$TS"
 mkdir -p "$APP" "$PROF"
 
 pinned=0
+backed=0
 # 1) 把 bundle 内部的 @deepseek-ai/* 钉到 runtime
 #    - 已是正确软链接   -> 跳过
 #    - 是真实目录       -> 备份后替换为软链接
@@ -68,6 +69,7 @@ for src in "$RT"/*; do
   elif [[ -e "$tgt" ]]; then
     mkdir -p "$BAK"
     mv "$tgt" "$BAK/$name"
+    backed=$((backed+1))
   fi
   ln -s "$src" "$tgt"
   pinned=$((pinned+1))
@@ -82,14 +84,18 @@ for src in "$RT"/*; do
     [[ "$(readlink "$tgt")" == "$src" ]] && continue
     rm "$tgt"
   elif [[ -e "$tgt" ]]; then
-    echo "  跳过 $name（profiles 中是真实目录，未改动）"
+    echo "  跳过 ${name}（profiles 中是真实目录，未改动）"
     continue
   fi
   ln -s "$src" "$tgt"
 done
 
 echo "✓ pin-runtime 完成：bundle 内钉死 $pinned 个包 -> runtime"
-echo "  bundle 真实目录备份（如有）： $BAK"
+if [[ $backed -gt 0 ]]; then
+  echo "  bundle 真实目录备份（$backed 个包）： $BAK"
+else
+  echo "  （本次没有 bundle 真实目录被替换，未产生新备份）"
+fi
 if command -v node >/dev/null 2>&1 && [[ -f "$RT/dsh/lib/bin.js" ]]; then
   echo "  runtime 版本： $(node "$RT/dsh/lib/bin.js" --version 2>/dev/null | head -n1)"
 fi

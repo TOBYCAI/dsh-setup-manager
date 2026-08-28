@@ -130,9 +130,9 @@ dsm install --dry-run          # 只报告将做什么，不改动
 
 > ⚠️ runtime 引导的目录布局依赖 DSH 上游约定，macOS 上已验证可用；换机器若 `doctor` 报 FAIL，按输出手动修正后重跑 `pin` 即可。`dsh web` 前请把 `export PATH="$HOME/.dsh/bin:$PATH"` 加入你的 shell rc（脚本安装完会提示）。
 
-**安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`dsm install`（已装则跳过）/ `dsm update`（升 runtime）/ `dsm shell`（升壳）/ `dsm web`（启动）/ `dsm doctor`（自检）/ `dsm rollback`（回滚）/ `dsm scan`（升级前查兼容）/ `dsm check`（定时报告）。一台机器只需 `dsm install` 一次。
+**安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`dsm install`（已装则跳过）/ `dsm update`（升 runtime）/ `dsm shell`（升壳）/ `dsm web`（启动）/ `dsm doctor`（自检）/ `dsm rollback`（回滚）/ `dsm cleanup`（清理备份）/ `dsm scan`（升级前查兼容）/ `dsm check`（定时报告）。一台机器只需 `dsm install` 一次。
 
-**健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、或 `dsh` 不在 PATH 时也不会崩溃**——版本探测失败只降级为 `?` / 优雅报告，不再中断。`doctor` 的软链校验是**版本无关**的：检查清单动态取自 runtime 中真实存在的 `@deepseek-ai` 包，app-only 包（runtime 中没有、本就该来自壳）不会误报。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`（不依赖 PATH、不被 stderr 吞），缺失时回退 `dsh --version`。
+**健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、或 `dsh` 不在 PATH 时也不会崩溃**——版本探测失败只降级为「未知」/ 优雅报告，不再中断。`doctor` 的软链校验是**版本无关**的：检查清单动态取自 runtime 中真实存在的 `@deepseek-ai` 包，app-only 包（runtime 中没有、本就该来自壳）不会误报。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`（不依赖 PATH、不被 stderr 吞），缺失时回退 `dsh --version`。
 
 ## 使用
 
@@ -165,6 +165,9 @@ dsm check --cron
 dsm doctor
 # 从最近的备份回滚：runtime / shell / all
 dsm rollback runtime
+# 交互式清理备份（列出 bundle-bak-*/shell-bak-*，选择删除 / 保留；--dry-run 仅查看）
+dsm cleanup
+dsm cleanup --dry-run
 # 升级前预览将变更的依赖树，不实际执行
 dsm update --dry-run
 ```
@@ -181,8 +184,9 @@ dsm update --dry-run
 | `web` | 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截） | 启动进程 |
 | `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围 | 只读 |
 | `check [--cron]` | 仅报告模式自检（可挂定时任务） | 只读 |
-| `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本 | 只读 |
+| `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本（备份列出真实路径与大小） | 只读 |
 | `rollback [runtime\|shell\|all]` | 从 `bundle-bak-*` / `shell-bak-*` 还原 | 写 |
+| `cleanup [--dry-run]` | 交互式清理备份：列出备份（类型/版本/时间/大小/路径），选择删除或保留 | 写（dry-run 只读） |
 
 ### 环境变量
 
