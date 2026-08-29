@@ -144,6 +144,9 @@ dsm pin
 dsm update
 # or non-interactively to a specific version:
 dsm update-runtime 0.1.1-rc.2
+# or build from official GitHub source (for versions npm hasn't published yet, e.g. alpha; no arg probes the latest dsh-v* tag):
+dsm update-src
+dsm update-src 0.1.2-alpha.1
 
 # 3) Upgrade the desktop shell (dsh-manage.sh auto-downloads the universal dmg from DSH Desktop's GitHub Releases, backs up then replaces)
 dsm shell
@@ -180,6 +183,7 @@ dsm update --dry-run
 | `status` | Show runtime / shell / guard vars / installed adapter versions | read-only |
 | `update [--dry-run]` | Upgrade runtime (`--dry-run` previews dependency-tree changes) | write (dry-run: read-only) |
 | `update-runtime <ver>` | Single-step non-interactive runtime upgrade to a version | write |
+| `update-src [<ver>]` | Build & install from official GitHub source (for versions not yet on npm; no arg probes the latest dsh-v* tag) | write |
 | `shell` | Upgrade the desktop shell (download, backup, replace; Linux/Windows framework in place, marked unverified) | write |
 | `web` | Launch web (auto-unload safe-delete guard so pnpm isn't blocked) | launches process |
 | `scan` | Scan installed LLM adapters vs runtime dsh version semver range | read-only |

@@ -144,6 +144,9 @@ dsm pin
 dsm update
 # 或单步非交互升级到指定版本：
 dsm update-runtime 0.1.1-rc.2
+# 或从官方 GitHub 源码构建安装（npm 尚未发布的版本，如 alpha；缺省探测最新 dsh-v* tag）：
+dsm update-src
+dsm update-src 0.1.2-alpha.1
 
 # 3) 升级桌面壳（dsh-manage.sh 自动从 DSH Desktop 的 GitHub Releases 下载 universal dmg，备份后替换）
 dsm shell
@@ -180,6 +183,7 @@ dsm update --dry-run
 | `status` | 显示 runtime / 壳 / 守卫变量 / 已装 adapter 版本 | 只读 |
 | `update [--dry-run]` | 升级 runtime（`--dry-run` 仅预览依赖树变更） | 写（dry-run 只读） |
 | `update-runtime <ver>` | 单步非交互升级 runtime 到指定版本 | 写 |
+| `update-src [<ver>]` | 从官方 GitHub 源码构建安装（npm 未发布时可用；缺省探测最新 dsh-v* tag） | 写 |
 | `shell` | 升级桌面壳（下载备份替换；Linux/Windows 框架已就位，标注未验证） | 写 |
 | `web` | 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截） | 启动进程 |
 | `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围 | 只读 |

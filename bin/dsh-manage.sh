@@ -21,6 +21,7 @@
 # 子命令：
 #   dsh-manage.sh update [--dry-run]        交互升级 runtime（--dry-run 只显示将变更的依赖）
 #   dsh-manage.sh update-runtime <ver>       非交互：直接升级 runtime 到指定版本
+#   dsh-manage.sh update-src [<ver>]         从官方 GitHub 源码构建安装（npm 未发布时可用；缺省探测最新 dsh-v* tag）
 #   dsh-manage.sh shell                      检测壳版本，交互确认后升级（按平台分发）
 #   dsh-manage.sh web [args..]               启动 dsh web（带 safe-delete 守卫卸载）
 #   dsh-manage.sh pin                        仅重钉 runtime（壳/Profile 软链 → runtime）
@@ -126,6 +127,8 @@ _dsh_do_upgrade() {
     echo "✗ registry 找不到 @deepseek-ai/dsh@${wanted}，跳过（版本未发布或拼写错误）。"
     return 1
   fi
+  # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
+  _dsh_src_restore
   local link; link="$(readlink "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh" 2>/dev/null || true)"
   base="$(dirname "$(dirname "$(dirname "${link:-$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh}")")")"
   pnpm="$(_dsh_pnpm)"
@@ -149,6 +152,147 @@ _dsh_do_upgrade() {
   echo "✓ 完成 → ${got}（重新钉死壳链接…）"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
   return 0
+}
+
+# ---- semver 比较：$1 > $2（含 prerelease，遵循 semver 优先级）----
+# 用法：_dsh_ver_gt 1.2.3 1.2.2 && echo yes
+_dsh_ver_gt() {
+  node -e '
+    const [a, b] = process.argv.slice(1)
+    const parse = (s) => {
+      const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(s)
+      if (!m) return null
+      return { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] ? m[4].split(".") : [] }
+    }
+    const cmp = (x, y) => {
+      for (const k of ["major", "minor", "patch"]) if (x[k] !== y[k]) return x[k] - y[k]
+      if (x.pre.length === 0 && y.pre.length === 0) return 0
+      if (x.pre.length === 0) return 1          // 正式版 > prerelease
+      if (y.pre.length === 0) return -1
+      const n = Math.max(x.pre.length, y.pre.length)
+      for (let i = 0; i < n; i++) {
+        const xp = x.pre[i] ?? "", yp = y.pre[i] ?? ""
+        if (xp === yp) continue
+        const xn = /^\d+$/.test(xp), yn = /^\d+$/.test(yp)
+        if (xn && yn) return +xp - +yp
+        if (xn) return -1                        // 数字标识符 < 字母标识符
+        if (yn) return 1
+        return xp < yp ? -1 : 1
+      }
+      return 0
+    }
+    const x = parse(a), y = parse(b)
+    process.exit(x && y && cmp(x, y) > 0 ? 0 : 1)
+  ' "$1" "$2" 2>/dev/null
+}
+
+# ---- 探测官方 GitHub dsh-v* tags，找出比当前安装更新的最新版 ----
+# 结果写入 _DSH_GH_NEW（可能为空）。用 git ls-remote，不依赖 gh。
+_dsh_gh_check() {
+  local tags v best=""
+  tags="$(git ls-remote --tags https://github.com/deepseek-ai/deepseek-harness 'refs/tags/dsh-v*' 2>/dev/null | sed -E 's#.*refs/tags/dsh-v([^ ]+)$#\1#' || true)"
+  for v in $tags; do
+    [ -z "$v" ] && continue
+    # 过滤掉 "^{}" 解引用行（带后缀）
+    case "$v" in *^{}*) continue;; esac
+    if _dsh_ver_gt "$v" "${_DSH_INST:-0.0.0}"; then
+      if [ -z "$best" ] || _dsh_ver_gt "$v" "$best"; then best="$v"; fi
+    fi
+  done
+  _DSH_GH_NEW="$best"
+}
+
+# ---- 从官方 GitHub 源码构建安装 runtime 到 $1（版本号如 0.1.2-alpha.1）----
+# 场景：官方先在 GitHub 打 dsh-v* tag / prerelease，npm 尚未发布时，也能安装。
+# 流程：sparse 克隆源码 → pnpm install + 完整构建 → runtime 以 workspace 方式
+#       挂载源码目录（--shamefully-hoist 保持与现有 runtime 布局一致）→ pin。
+# 回滚：npm 版本可用后，dsm update / update-runtime 会先恢复备份的 package.json。
+_dsh_do_upgrade_src() {
+  local wanted="$1" pnpm src_dir rt_dir
+  [ -z "$wanted" ] && { echo "✗ 未指定版本" >&2; return 1; }
+  pnpm="$(_dsh_pnpm)"
+  if [ -z "$pnpm" ]; then echo "✗ 需要 pnpm（源码构建依赖 pnpm workspace）" >&2; return 1; fi
+  src_dir="$DSH_HOME/runtime-src/$wanted"
+  rt_dir="$DSH_HOME/runtime"
+  [ -d "$rt_dir" ] || { echo "✗ runtime 目录不存在: $rt_dir" >&2; return 1; }
+
+  # 1) 下载源码（sparse 克隆；只拉构建所需目录，约 20-60 秒 / 20MB）
+  if [ ! -d "$src_dir/apps" ]; then
+    mkdir -p "$DSH_HOME/runtime-src"
+    echo "→ 下载官方源码（sparse 克隆 dsh-v${wanted}，仅拉构建所需目录）..."
+    GIT_HTTP_VERSION=1 git clone --depth 1 --branch "dsh-v$wanted" --sparse \
+      https://github.com/deepseek-ai/deepseek-harness.git "$src_dir" 2>&1 | tail -2 \
+      || { echo "✗ 源码下载失败（tag dsh-v${wanted} 可能不存在或网络不通）"; return 1; }
+    ( cd "$src_dir" && git sparse-checkout set --skip-checks \
+        apps packages vendor native patches website \
+        pnpm-workspace.yaml package.json pnpm-lock.yaml scripts .npmrc 2>/dev/null || true )
+  else
+    echo "→ 复用已下载源码 ${src_dir}"
+  fi
+
+  # 2) 安装依赖 + 完整构建（corepack 自动适配官方 pnpm 版本，首次约 2-10 分钟）
+  echo "→ 安装 monorepo 依赖并完整构建（首次较慢，请耐心等待）..."
+  ( cd "$src_dir" && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0 \
+    && "$pnpm" install --ignore-scripts 2>&1 | tail -3 \
+    && "$pnpm" run build 2>&1 | tail -3 ) \
+    || { echo "✗ 依赖安装或构建失败（可在 ${src_dir} 手动排查后重跑）"; return 1; }
+
+  # 3) 备份当前 runtime 的 package.json（npm 升级时用于恢复）
+  local bak="$DSH_HOME/runtime-src/backup"
+  if [ -f "$rt_dir/package.json" ]; then
+    mkdir -p "$bak"
+    cp "$rt_dir/package.json" "$bak/package.json"
+    echo "→ 已备份原 package.json -> ${bak}/package.json"
+  fi
+
+  # 4) runtime 挂载源码目录为 pnpm workspace（用相对路径，pnpm glob 不支持绝对路径）
+  local rel_src
+  rel_src="$(node -e 'const {relative}=require("path");process.stdout.write(relative(process.argv[1],process.argv[2]))' "$rt_dir" "$src_dir")"
+  cat > "$rt_dir/pnpm-workspace.yaml" <<EOF
+# dsh-manage.sh update-src 生成：挂载源码目录为 workspace（npm 更新时会移除）
+packages:
+  - .
+  - ${rel_src}/apps/*
+  - ${rel_src}/packages/*/*
+  - ${rel_src}/vendor/*
+  - ${rel_src}/native/landlock-run/packages/*
+EOF
+  # 5) package.json 依赖改为 workspace:^（其余依赖不动，由 pnpm 从 workspace 解析）
+  node -e '
+    const fs = require("fs")
+    const p = process.argv[1]
+    const j = JSON.parse(fs.readFileSync(p, "utf8"))
+    if (j.dependencies && j.dependencies["@deepseek-ai/dsh"]) j.dependencies["@deepseek-ai/dsh"] = "workspace:^"
+    fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
+  ' "$rt_dir/package.json" || { echo "✗ 修改 package.json 失败"; return 1; }
+
+  # 6) 重装（--shamefully-hoist 保持 node_modules/@deepseek-ai 完整闭包，与 pin 布局一致）
+  echo "→ 安装 ${wanted} 到 runtime（--shamefully-hoist）..."
+  ( cd "$rt_dir" && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0 \
+    && rm -rf node_modules pnpm-lock.yaml \
+    && "$pnpm" install --shamefully-hoist --ignore-scripts 2>&1 | tail -4 ) \
+    || { echo "✗ runtime 安装失败；可恢复备份 package.json 后重试"; return 1; }
+
+  # 7) 重钉壳链接 + 验证
+  echo "→ 重新钉死壳链接..."
+  zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
+  local got; got="$(dsh --version 2>/dev/null | head -n1)"
+  if [ "$got" = "$wanted" ]; then
+    echo "✓ 完成 → ${got}（源码安装 dsh-v${wanted}）"
+    return 0
+  fi
+  echo "⚠ 安装完成但版本检测=${got:-未知}（期望 ${wanted}）。可重跑 dsh-manage.sh pin。"
+  return 0
+}
+
+# ---- 恢复源码安装前的 runtime package.json（npm 升级前调用）----
+_dsh_src_restore() {
+  local bak="$DSH_HOME/runtime-src/backup/package.json"
+  if [ -f "$bak" ] && [ -f "$DSH_HOME/runtime/package.json" ]; then
+    cp "$bak" "$DSH_HOME/runtime/package.json"
+    rm -f "$DSH_HOME/runtime/pnpm-workspace.yaml"
+    echo "→ 已恢复源码安装前的 package.json（并移除 workspace 挂载）"
+  fi
 }
 
 # ---- 壳版本检测 ----
@@ -607,7 +751,11 @@ case "$cmd" in
           echo "    依赖变更："
           printf '%s\n' "$deps" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const ks=Object.keys(o);console.log(ks.length?ks.map(k=>"      - "+k+"@"+o[k]).join("\n"):"      (无可列依赖)")}catch(e){console.log("      (无法解析依赖)")}})'
         done
-        echo "ℹ dry-run 未做任何改动。去掉 --dry-run 可交互升级。"
+        _dsh_gh_check
+        if [ -n "${_DSH_GH_NEW:-}" ]; then
+          echo "→ GitHub 源码渠道：官方有更新的源码版本 ${_DSH_GH_NEW}（npm 尚未发布）"
+        fi
+        echo "ℹ dry-run 未做任何改动。去掉 --dry-run 可交互升级（含源码渠道）。"
       fi
     else
       if [ -z "${_DSH_NEXT:-}${_DSH_LATEST:-}" ]; then
@@ -617,7 +765,20 @@ case "$cmd" in
           [ -z "$v" ] && continue; [ "$v" = "$_DSH_INST" ] && continue
           case "$seen" in *"|$v|"*) continue;; esac; seen="$seen|$v|"; cands+=("$v")
         done
-        if [ ${#cands[@]} -eq 0 ]; then echo "✓ runtime 已是最新（${_DSH_INST}）。"
+        if [ ${#cands[@]} -eq 0 ]; then
+          echo "✓ npm registry 已是最新（${_DSH_INST}）。"
+          # npm 无候选时，探测官方 GitHub 是否有更新的源码版本（npm 尚未发布）
+          _dsh_gh_check
+          if [ -n "${_DSH_GH_NEW:-}" ]; then
+            echo "ℹ 官方 GitHub 有更新的源码版本：${_DSH_GH_NEW}（npm 尚未发布）"
+            if [ -t 0 ]; then
+              if _dsh_confirm "是否从 GitHub 源码构建安装 ${_DSH_GH_NEW}? [y/N] "; then
+                _dsh_do_upgrade_src "$_DSH_GH_NEW" || echo "⚠ 源码安装失败"
+              else echo "  已跳过。npm 发布后 dsm update 即可正常升级。"; fi
+            else
+              echo "ℹ 非交互环境，跳过。npm 发布后 dsm update 即可正常升级。"
+            fi
+          fi
         elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 ${_DSH_INST}；可用: ${cands[*]}）。"
         else for v in "${cands[@]}"; do
           if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then _dsh_do_upgrade "$v" || echo "⚠ $v 失败"; else echo "  跳过 $v"; fi
@@ -627,6 +788,23 @@ case "$cmd" in
     ;;
   update-runtime)
     _dsh_do_upgrade "${1:-}"
+    ;;
+  update-src)
+    _dsh_check_update
+    want="${1:-}"
+    if [ -z "$want" ]; then
+      _dsh_gh_check
+      want="${_DSH_GH_NEW:-}"
+      if [ -z "$want" ]; then
+        echo "✓ GitHub 没有比当前（${_DSH_INST:-未知}）更新的源码版本。"
+        exit 0
+      fi
+      echo "→ 官方 GitHub 最新源码版本：${want}（npm 尚未发布）"
+      if [ -t 0 ]; then
+        _dsh_confirm "确认从源码构建安装 ${want}? [y/N] " || { echo "已取消。"; exit 0; }
+      fi
+    fi
+    _dsh_do_upgrade_src "$want"
     ;;
   shell)
     _dsh_shell_check
@@ -669,5 +847,5 @@ case "$cmd" in
     echo "runtime 当前: ${_DSH_INST:-未知} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
     echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
     ;;
-  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
+  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
 esac
