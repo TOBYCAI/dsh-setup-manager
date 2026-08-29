@@ -393,7 +393,8 @@ _dsh_web() {
   local cands=() seen="" v
   for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
     [ -z "$v" ] && continue
-    [ "$v" = "$_DSH_INST" ] && continue
+    # 只有比当前版本更新才算候选（避免源码装的 alpha 被误提示降级到 npm 旧版）
+    _dsh_ver_gt "$v" "$_DSH_INST" || continue
     case "$seen" in *"|$v|"*) continue;; esac
     seen="$seen|$v|"; cands+=("$v")
   done
@@ -476,7 +477,7 @@ _dsh_doctor() {
   _dsh_check_update; _dsh_shell_check
   echo "  runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
   echo "  壳:     ${_DSH_SHELL_CUR:-未知}（最新=${_DSH_SHELL_LATEST:-无}）"
-  [ -n "${_DSH_NEXT:-}${_DSH_LATEST:-}" ] && { [ "$_DSH_INST" != "$_DSH_NEXT" ] || [ "$_DSH_INST" != "$_DSH_LATEST" ]; } \
+  { [ -n "${_DSH_NEXT:-}" ] && _dsh_ver_gt "$_DSH_NEXT" "$_DSH_INST"; } || { [ -n "${_DSH_LATEST:-}" ] && _dsh_ver_gt "$_DSH_LATEST" "$_DSH_INST"; } \
     && echo "  [INFO] runtime 有可用更新"
   echo "=== 自检完成: $([ $fail -eq 0 ] && echo '无致命问题 ✅' || echo '存在 FAIL，请处理 ❌') ==="
   return $fail
@@ -745,7 +746,7 @@ case "$cmd" in
       else
         inst="${_DSH_INST:-未知}"
         for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
-          [ -z "$v" ] && continue; [ "$v" = "$inst" ] && continue
+          [ -z "$v" ] && continue; _dsh_ver_gt "$v" "$inst" || continue
           echo "→ 若升级 runtime 到 ${v}（当前 ${inst}）："
           deps="$(npm view "@deepseek-ai/dsh@$v" dependencies --json 2>/dev/null)"
           echo "    依赖变更："
@@ -762,7 +763,7 @@ case "$cmd" in
         echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-未知}"
       else
         cands=(); seen=""; for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
-          [ -z "$v" ] && continue; [ "$v" = "$_DSH_INST" ] && continue
+          [ -z "$v" ] && continue; _dsh_ver_gt "$v" "$_DSH_INST" || continue
           case "$seen" in *"|$v|"*) continue;; esac; seen="$seen|$v|"; cands+=("$v")
         done
         if [ ${#cands[@]} -eq 0 ]; then
@@ -825,8 +826,8 @@ case "$cmd" in
     _dsh_check_update; _dsh_shell_check
     cron=0; [ "${1:-}" = "--cron" ] && cron=1
     upd=""
-    [ -n "${_DSH_NEXT:-}" ] && [ "$_DSH_INST" != "$_DSH_NEXT" ] && upd="runtime:next=$_DSH_NEXT"
-    [ -n "${_DSH_LATEST:-}" ] && [ "$_DSH_INST" != "$_DSH_LATEST" ] && upd="${upd:+$upd, }latest=$_DSH_LATEST"
+    [ -n "${_DSH_NEXT:-}" ] && _dsh_ver_gt "$_DSH_NEXT" "$_DSH_INST" && upd="runtime:next=$_DSH_NEXT"
+    [ -n "${_DSH_LATEST:-}" ] && _dsh_ver_gt "$_DSH_LATEST" "$_DSH_INST" && upd="${upd:+$upd, }latest=$_DSH_LATEST"
     [ -n "${_DSH_SHELL_LATEST:-}" ] && [ "$_DSH_SHELL_CUR" != "$_DSH_SHELL_LATEST" ] && upd="${upd:+$upd, }shell=$_DSH_SHELL_LATEST"
     if [ $cron -eq 1 ]; then
       echo "dsh-check $(date -u +%FT%TZ) runtime=$_DSH_INST shell=$_DSH_SHELL_CUR updates=${upd:-none}"
