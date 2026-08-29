@@ -573,11 +573,19 @@ _dsh_backup_list() {
   done < <(find "$DSH_HOME/runtime-src" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
 }
 
-# ---- 判断某源码版本是否正被 runtime 使用（pnpm-workspace.yaml 挂载引用）----
-# workspace 文件用相对路径（../runtime-src/<ver>/...），也兼容绝对路径，故匹配公共子串
+# ---- 判断某源码版本是否正被 runtime 使用（保护：任何安装方式下都不可删）----
+# 命中任一即视为在用：
+#   1) pnpm-workspace.yaml 挂载引用（源码安装，相对/绝对路径兼容，匹配公共子串）
+#   2) 与 runtime 当前实际安装版本号相同（npm 安装也能兜住：同名缓存视为在用）
 _dsh_src_in_use() {
-  [ -f "$DSH_HOME/runtime/pnpm-workspace.yaml" ] || return 1
-  grep -qF "runtime-src/$1/" "$DSH_HOME/runtime/pnpm-workspace.yaml" 2>/dev/null
+  if [ -f "$DSH_HOME/runtime/pnpm-workspace.yaml" ] \
+    && grep -qF "runtime-src/$1/" "$DSH_HOME/runtime/pnpm-workspace.yaml" 2>/dev/null; then
+    return 0
+  fi
+  local cur
+  cur="$(node -e 'try{console.log(require(process.argv[1]).version)}catch(e){}' \
+    "$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/package.json" 2>/dev/null)"
+  [ "$cur" = "$1" ]
 }
 
 # ---- 清理备份（交互式选择删除 / 保留）----
