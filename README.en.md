@@ -190,7 +190,7 @@ dsm update --dry-run
 | `check [--cron]` | Report-only self-check (wire into a scheduled task) | read-only |
 | `doctor` | Self-check symlink targets / backup dirs / guards / versions (backups listed with real path + size) | read-only |
 | `rollback [runtime\|shell\|all]` | Restore from `bundle-bak-*` / `shell-bak-*` | write |
-| `cleanup [--dry-run]` | Interactively clear backups: lists them (type/version/date/size/path), choose delete or keep | write (dry-run: read-only) |
+| `cleanup [--dry-run]` | Interactively clear backups: `bundle-bak-*` / `shell-bak-*` / `runtime-src` source caches (in-use version is protected and cannot be removed) | write (dry-run: read-only) |
 
 ### Environment variables
 

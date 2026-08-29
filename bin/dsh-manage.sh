@@ -128,7 +128,7 @@ _dsh_do_upgrade() {
     return 1
   fi
   # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
-  _dsh_src_restore
+  _dsh_src_restore "$wanted"
   local link; link="$(readlink "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh" 2>/dev/null || true)"
   base="$(dirname "$(dirname "$(dirname "${link:-$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh}")")")"
   pnpm="$(_dsh_pnpm)"
@@ -286,12 +286,28 @@ EOF
 }
 
 # ---- 恢复源码安装前的 runtime package.json（npm 升级前调用）----
+# $1 = 目标 npm 版本：backup 缺失（被 cleanup 删除）时，把 workspace:^ 直接改为该版本
 _dsh_src_restore() {
   local bak="$DSH_HOME/runtime-src/backup/package.json"
   if [ -f "$bak" ] && [ -f "$DSH_HOME/runtime/package.json" ]; then
     cp "$bak" "$DSH_HOME/runtime/package.json"
     rm -f "$DSH_HOME/runtime/pnpm-workspace.yaml"
     echo "→ 已恢复源码安装前的 package.json（并移除 workspace 挂载）"
+    return 0
+  fi
+  # 兜底：backup 缺失，但 package.json 仍是源码安装状态（workspace:^）→ 改写为 npm 版本
+  if [ -f "$DSH_HOME/runtime/package.json" ] && [ -n "${1:-}" ]; then
+    if grep -q '"@deepseek-ai/dsh"[[:space:]]*:[[:space:]]*"workspace:\^"' "$DSH_HOME/runtime/package.json"; then
+      node -e '
+        const fs = require("fs")
+        const p = process.argv[1], v = process.argv[2]
+        const j = JSON.parse(fs.readFileSync(p, "utf8"))
+        if (j.dependencies && j.dependencies["@deepseek-ai/dsh"] === "workspace:^") j.dependencies["@deepseek-ai/dsh"] = v
+        fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
+      ' "$DSH_HOME/runtime/package.json" "$1" 2>/dev/null || return 1
+      rm -f "$DSH_HOME/runtime/pnpm-workspace.yaml"
+      echo "→ 源码回滚备份已缺失，已将 package.json 的 workspace:^ 改为 npm 版本 $1（并移除 workspace 挂载）"
+    fi
   fi
 }
 
@@ -526,9 +542,10 @@ _dsh_ts_fmt() {
   printf '%s' "$t"
 }
 
-# ---- 列出备份（bundle-bak-* / shell-bak-*），每行：类型<TAB>版本<TAB>时间戳<TAB>大小<TAB>路径 ----
+# ---- 列出备份（bundle-bak-* / shell-bak-* / runtime-src），每行：类型<TAB>版本<TAB>时间戳<TAB>大小<TAB>路径 ----
 _dsh_backup_list() {
   local d name type ver ts
+  # bundle-bak-*（runtime pin）与 shell-bak-*（壳升级）
   while IFS= read -r d; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
@@ -546,6 +563,21 @@ _dsh_backup_list() {
     esac
     printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$ver" "$ts" "$(du -sh "$d" 2>/dev/null | awk '{print $1}')" "$d"
   done < <(find "$DSH_HOME" -maxdepth 1 -type d \( -name 'bundle-bak-*' -o -name 'shell-bak-*' \) 2>/dev/null | sort)
+  # runtime-src：update-src 的源码缓存（每版本一个目录，可能很大）+ 回滚备份（package.json）
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    type="源码缓存"; ver="$name"; ts="-"
+    [ "$name" = "backup" ] && { type="源码回滚备份"; ver="-"; }
+    printf '%s\t%s\t%s\t%s\t%s\n' "$type" "$ver" "$ts" "$(du -sh "$d" 2>/dev/null | awk '{print $1}')" "$d"
+  done < <(find "$DSH_HOME/runtime-src" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
+}
+
+# ---- 判断某源码版本是否正被 runtime 使用（pnpm-workspace.yaml 挂载引用）----
+# workspace 文件用相对路径（../runtime-src/<ver>/...），也兼容绝对路径，故匹配公共子串
+_dsh_src_in_use() {
+  [ -f "$DSH_HOME/runtime/pnpm-workspace.yaml" ] || return 1
+  grep -qF "runtime-src/$1/" "$DSH_HOME/runtime/pnpm-workspace.yaml" 2>/dev/null
 }
 
 # ---- 清理备份（交互式选择删除 / 保留）----
@@ -558,15 +590,17 @@ _dsh_cleanup() {
     items+=("$type|$ver|$ts|$size|$path")
   done < <(_dsh_backup_list)
   if [ ${#items[@]} -eq 0 ]; then
-    echo "✓ 没有找到任何备份（bundle-bak-*/shell-bak-*），无需清理。"
+    echo "✓ 没有找到任何备份（bundle-bak-*/shell-bak-*/runtime-src），无需清理。"
     return 0
   fi
   echo "=== DSH 备份清理 ==="
-  echo "共 ${#items[@]} 个备份（删除后对应版本无法再 rollback）："
+  echo "共 ${#items[@]} 个备份（删除后对应版本无法再 rollback；⚠ 在用 的源码缓存不可删）："
   for line in "${items[@]}"; do
     i=$((i+1))
     IFS='|' read -r type ver ts size path <<< "$line"
-    printf '  [%2d] %-10s | 版本 %-9s | %s | %s\n        %s\n' "$i" "$type" "$ver" "$(_dsh_ts_fmt "$ts")" "$size" "$path"
+    flag=""
+    if [ "$type" = "源码缓存" ] && _dsh_src_in_use "$ver"; then flag=" ⚠在用"; fi
+    printf '  [%2d] %-12s | 版本 %-11s | %s | %s%s\n        %s\n' "$i" "$type" "$ver" "$(_dsh_ts_fmt "$ts")" "$size" "$flag" "$path"
   done
   if [ $dry -eq 1 ]; then echo "ℹ --dry-run：仅列出，未删除任何备份。"; return 0; fi
   [ -t 0 ] || { echo "✗ 非交互环境，请在终端中运行 cleanup（可用 --dry-run 仅查看）。"; return 1; }
@@ -596,6 +630,11 @@ _dsh_cleanup() {
   for n in "${dels[@]}"; do
     line="${items[$((n-1))]}"
     IFS='|' read -r type ver ts size path <<< "$line"
+    # 在用保护：正被 runtime 挂载的源码缓存不可删（删了 runtime 的 dsh 直接失效）
+    if [ "$type" = "源码缓存" ] && _dsh_src_in_use "$ver"; then
+      echo "  ⚠ 跳过（在用）: $path（先 dsm update-runtime <npm版> 切回 npm 再清理）"
+      continue
+    fi
     if rm -rf "$path" 2>/dev/null; then echo "  ✓ 已删除 $path"; else echo "  ✗ 删除失败 $path"; fi
   done
   echo "--- 剩余备份 ---"

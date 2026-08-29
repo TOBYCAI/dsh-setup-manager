@@ -190,7 +190,7 @@ dsm update --dry-run
 | `check [--cron]` | 仅报告模式自检（可挂定时任务） | 只读 |
 | `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本（备份列出真实路径与大小） | 只读 |
 | `rollback [runtime\|shell\|all]` | 从 `bundle-bak-*` / `shell-bak-*` 还原 | 写 |
-| `cleanup [--dry-run]` | 交互式清理备份：列出备份（类型/版本/时间/大小/路径），选择删除或保留 | 写（dry-run 只读） |
+| `cleanup [--dry-run]` | 交互式清理备份：`bundle-bak-*` / `shell-bak-*` / `runtime-src` 源码缓存（在用版本受保护，不可删） | 写（dry-run 只读） |
 
 ### 环境变量
 
