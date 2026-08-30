@@ -157,10 +157,13 @@ _dsh_space_estimate_npm() {
 
 # 源码渠道：sparse 克隆小，但构建依赖装完后源码目录可达 GB 级（本机 0.1.2-alpha.1 实测 1.6G）
 _dsh_space_estimate_src() {
-  local ver="$1" src_dir="$DSH_HOME/runtime-src/$ver" cur_kb
+  # 注意：ver 与 src_dir 不能在同一行 local——bash 的 local 参数先统一展开，
+  # 同行引用 $ver 时取到的还是旧值（空），路径会拼成 runtime-src/。
+  local ver="$1"
+  local src_dir="$DSH_HOME/runtime-src/$ver" cur_kb
   echo "  📦 源码渠道构建安装 dsh-v$ver 的空间预估："
-  # 注意：不看 apps/ 子目录（上游仓库结构会变），缓存目录存在即视为已下载
-  if [ -d "$src_dir" ]; then
+  # 与 _dsh_do_upgrade_src 的复用判断同口径：看 .git（上游顶层结构会变）
+  if [ -d "$src_dir/.git" ]; then
     cur_kb="$(du -sk "$src_dir" 2>/dev/null | awk '{print $1}')"
     echo "    - 该版本源码缓存已存在（${cur_kb:+$(_dsh_hfmt_kb "$cur_kb")}），复用不再下载；重新构建可能新增产物"
   else
@@ -282,7 +285,9 @@ _dsh_do_upgrade_src() {
   [ -d "$rt_dir" ] || { echo "✗ runtime 目录不存在: $rt_dir" >&2; return 1; }
 
   # 1) 下载源码（sparse 克隆；只拉构建所需目录，约 20-60 秒 / 20MB）
-  if [ ! -d "$src_dir/apps" ]; then
+  # 复用判断用 .git（目录级）：上游仓库顶层结构会变（apps/ 已不存在），
+  # 旧判断 [ -d apps ] 会把已缓存源码误判为未下载而重复 clone。
+  if [ ! -d "$src_dir/.git" ]; then
     mkdir -p "$DSH_HOME/runtime-src"
     echo "→ 下载官方源码（sparse 克隆 dsh-v${wanted}，仅拉构建所需目录）..."
     GIT_HTTP_VERSION=1 git clone --depth 1 --branch "dsh-v$wanted" --sparse \
