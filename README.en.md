@@ -148,6 +148,13 @@ dsm update-runtime 0.1.1-rc.2
 dsm update-src
 dsm update-src 0.1.2-alpha.1
 
+# ⚠ Before any upgrade, dsm shows a disk-space estimate: the npm channel reports
+#   the package size, official dependency count and your current runtime footprint
+#   as a reference (plus a pnpm store note); the source channel reports the cached
+#   source tree (reused when present, no re-clone) or a 1-2 GB post-build warning;
+#   the shell channel reports the dmg download size plus backup. When free space
+#   is under 2x the estimate it suggests running `dsm cleanup` first.
+
 # 3) Upgrade the desktop shell (dsh-manage.sh auto-downloads the universal dmg from DSH Desktop's GitHub Releases, backs up then replaces)
 dsm shell
 

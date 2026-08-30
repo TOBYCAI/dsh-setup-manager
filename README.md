@@ -148,6 +148,11 @@ dsm update-runtime 0.1.1-rc.2
 dsm update-src
 dsm update-src 0.1.2-alpha.1
 
+# ⚠ 升级前会先显示本次的空间预估：npm 渠道报包本体大小、官方依赖数量、
+#   本机现有 runtime 实际占用参照与 pnpm store 提示；源码渠道报源码缓存
+#   （已缓存则复用，不再克隆）或构建后可达 1-2 GB 的提示；壳渠道报 dmg
+#   下载量与备份占用。磁盘余量不足（预估 2 倍）时提示先 dsm cleanup。
+
 # 3) 升级桌面壳（dsh-manage.sh 自动从 DSH Desktop 的 GitHub Releases 下载 universal dmg，备份后替换）
 dsm shell
 
