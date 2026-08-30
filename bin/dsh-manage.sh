@@ -119,6 +119,71 @@ _dsh_check_update() {
   _DSH_NEXT="$next"; _DSH_LATEST="$latest"; _DSH_INST="$inst"
 }
 
+# ==== 安装 / 升级前的磁盘空间预估 ====
+# 用户诉求：无论 npm 还是源码渠道，动手前先告知本次升级会占用多少空间。
+# 估算口径刻意保守而快速（npm install --dry-run 在代理网络下会卡死全树解析，
+# 故只查 npm 元数据 + 本机实际占用参照，2-3 个请求内完成）。
+
+_dsh_hfmt_kb() { # KB -> 人类可读
+  awk -v k="$1" 'BEGIN{ if(k>=1048576) printf "%.1f GB", k/1048576; else if(k>=1024) printf "%.1f MB", k/1024; else printf "%d KB", k }'
+}
+_dsh_disk_free_kb() { df -k "$1" 2>/dev/null | awk 'NR==2{print $4}'; }
+# 余量不足时告警：预估（或参照）×2 仍大于可用空间就提示
+_dsh_space_warn() { # $1=目标路径 $2=预估KB（可空）
+  local free_kb="$(_dsh_disk_free_kb "${1:-$DSH_HOME}")"
+  [ -z "$free_kb" ] && return 0
+  echo "    磁盘可用：$(_dsh_hfmt_kb "$free_kb")"
+  if [ -n "${2:-}" ] && [ "$free_kb" -lt $(( ${2:-0} * 2 )) ]; then
+    echo "    ⚠ 磁盘余量偏紧（预估占用的 2 倍已超过可用空间），建议先清理：dsm cleanup"
+  fi
+}
+
+# npm 渠道：dsh 本体 unpackedSize + 官方依赖数量；本机已有 runtime 时给实际占用参照
+_dsh_space_estimate_npm() {
+  local ver="$1" self nb_deps cur_kb store_dir
+  echo "  📦 npm 渠道安装 @deepseek-ai/dsh@$ver 的空间预估："
+  self="$(npm view "@deepseek-ai/dsh@$ver" dist.unpackedSize 2>/dev/null || true)"
+  [ -n "$self" ] && echo "    - 包本体：$(_dsh_hfmt_kb $(( self / 1024 )))"
+  nb_deps="$(npm view "@deepseek-ai/dsh@$ver" dependencies --json 2>/dev/null | grep -c '@deepseek-ai/' || true)"
+  [ -n "$nb_deps" ] && [ "$nb_deps" -gt 0 ] && echo "    - 另有 ${nb_deps} 个 @deepseek-ai/* 官方依赖一跳，完整依赖树安装后远大于本体"
+  if [ -d "$DSH_HOME/runtime/node_modules" ]; then
+    cur_kb="$(du -sk "$DSH_HOME/runtime" 2>/dev/null | awk '{print $1}')"
+    [ -n "$cur_kb" ] && echo "    - 参照：本机现有 runtime 实际占用 $(_dsh_hfmt_kb "$cur_kb")（升级后量级相近）"
+    store_dir="$(pnpm store path 2>/dev/null || true)"
+    [ -n "$store_dir" ] && echo "    - 注意：pnpm 全局 store（$(du -sk "$store_dir" 2>/dev/null | awk '{print $1}' | { read s; [ -n "$s" ] && _dsh_hfmt_kb "$s" || echo "未知"; })）会同步新增一份缓存"
+  fi
+  _dsh_space_warn "$DSH_HOME" "$cur_kb"
+}
+
+# 源码渠道：sparse 克隆小，但构建依赖装完后源码目录可达 GB 级（本机 0.1.2-alpha.1 实测 1.6G）
+_dsh_space_estimate_src() {
+  local ver="$1" src_dir="$DSH_HOME/runtime-src/$ver" cur_kb
+  echo "  📦 源码渠道构建安装 dsh-v$ver 的空间预估："
+  # 注意：不看 apps/ 子目录（上游仓库结构会变），缓存目录存在即视为已下载
+  if [ -d "$src_dir" ]; then
+    cur_kb="$(du -sk "$src_dir" 2>/dev/null | awk '{print $1}')"
+    echo "    - 该版本源码缓存已存在（${cur_kb:+$(_dsh_hfmt_kb "$cur_kb")}），复用不再下载；重新构建可能新增产物"
+  else
+    echo "    - sparse 克隆源码：约 20-60 MB"
+    echo "    - ⚠ pnpm install + 完整构建后，源码目录可达 1-2 GB（pnpm store 同步增长）"
+  fi
+  _dsh_space_warn "$DSH_HOME" "$cur_kb"
+}
+
+# 壳渠道：GitHub Release asset 的 content-length 即 dmg/exe 下载大小
+_dsh_space_estimate_shell() {
+  local url="$1" len
+  echo "  📦 壳升级的空间预估："
+  len="$(curl -sIL --max-time 15 "$url" 2>/dev/null | grep -i '^content-length' | tail -1 | tr -dc '0-9')"
+  if [ -n "$len" ] && [ "$len" -gt 0 ]; then
+    echo "    - 安装包下载：$(_dsh_hfmt_kb $(( len / 1024 )))（解压安装后实际占用更大）"
+  else
+    echo "    - 安装包大小未知（网络探测失败），通常为数百 MB 下载量"
+  fi
+  echo "    - 升级脚本会先完整备份当前壳（.app 原样复制一份）"
+  _dsh_space_warn "/Applications" "$(( len / 1024 * 3 ))"
+}
+
 # ---- 就地升级共享 runtime 到 $1 ----
 _dsh_do_upgrade() {
   local wanted="$1" base pnpm
@@ -416,6 +481,7 @@ _dsh_web() {
   done
   if [ ${#cands[@]} -gt 0 ] && [ -t 0 ]; then
     for v in "${cands[@]}"; do
+      _dsh_space_estimate_npm "$v"
       if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then
         _dsh_do_upgrade "$v" || echo "⚠ $v 升级失败"
       else
@@ -669,6 +735,7 @@ _dsh_bootstrap_runtime() {
     [ -z "$ver" ] && { echo "✗ 无法获取 @deepseek-ai/dsh 最新版本（离线？）。可用 --runtime <ver> 显式指定。"; return 1; }
   fi
   echo "→ 引导 runtime：@deepseek-ai/dsh@$ver → $DSH_HOME/runtime"
+  _dsh_space_estimate_npm "$ver"
   mkdir -p "$DSH_HOME/runtime"
   printf '{\n  "name": "dsh-runtime",\n  "version": "1.0.0",\n  "private": true,\n  "dependencies": { "@deepseek-ai/dsh": "%s" }\n}\n' "$ver" > "$DSH_HOME/runtime/package.json"
   pnpm="$(_dsh_pnpm)"
@@ -768,6 +835,7 @@ _dsh_install() {
   fi
   if [ $doshell -eq 1 ]; then
     if [ -t 0 ]; then
+      _dsh_space_estimate_shell "${_DSH_SHELL_URL:-}"
       if _dsh_confirm "安装桌面壳（DSH Desktop ${_DSH_SHELL_LATEST:-最新}）? [y/N] "; then
         _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST" || echo "⚠ 壳安装失败，可手动安装后重跑"
       else echo "  跳过壳安装（--no-shell 可显式跳过）"; fi
@@ -820,6 +888,7 @@ case "$cmd" in
           if [ -n "${_DSH_GH_NEW:-}" ]; then
             echo "ℹ 官方 GitHub 有更新的源码版本：${_DSH_GH_NEW}（npm 尚未发布）"
             if [ -t 0 ]; then
+              _dsh_space_estimate_src "$_DSH_GH_NEW"
               if _dsh_confirm "是否从 GitHub 源码构建安装 ${_DSH_GH_NEW}? [y/N] "; then
                 _dsh_do_upgrade_src "$_DSH_GH_NEW" || echo "⚠ 源码安装失败"
               else echo "  已跳过。npm 发布后 dsm update 即可正常升级。"; fi
@@ -829,12 +898,14 @@ case "$cmd" in
           fi
         elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 ${_DSH_INST}；可用: ${cands[*]}）。"
         else for v in "${cands[@]}"; do
+          _dsh_space_estimate_npm "$v"
           if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then _dsh_do_upgrade "$v" || echo "⚠ $v 失败"; else echo "  跳过 $v"; fi
         done; fi
       fi
     fi
     ;;
   update-runtime)
+    _dsh_space_estimate_npm "${1:-}" 2>/dev/null || true
     _dsh_do_upgrade "${1:-}"
     ;;
   update-src)
@@ -849,8 +920,11 @@ case "$cmd" in
       fi
       echo "→ 官方 GitHub 最新源码版本：${want}（npm 尚未发布）"
       if [ -t 0 ]; then
+        _dsh_space_estimate_src "$want"
         _dsh_confirm "确认从源码构建安装 ${want}? [y/N] " || { echo "已取消。"; exit 0; }
       fi
+    else
+      _dsh_space_estimate_src "$want"
     fi
     _dsh_do_upgrade_src "$want"
     ;;
@@ -860,6 +934,7 @@ case "$cmd" in
     if [ -z "${_DSH_SHELL_LATEST:-}" ] || [ "$_DSH_SHELL_LATEST" = "$_DSH_SHELL_CUR" ]; then
       echo "✓ 壳已是最新。"
     elif [ -t 0 ]; then
+      _dsh_space_estimate_shell "$_DSH_SHELL_URL"
       if _dsh_confirm "升级壳到 $_DSH_SHELL_LATEST? [y/N] "; then _dsh_shell_upgrade "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST"; else echo "已取消。"; fi
     else
       echo "ℹ 非交互环境，未自动升级壳。可手动运行 dsh-manage.sh shell（在 tty 中）。"
