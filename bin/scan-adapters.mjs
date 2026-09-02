@@ -34,6 +34,14 @@ function cmp(a, b) {
 }
 function satisfies(range, ver) {
   if (!range || range === '*' || range === 'x' || range === '') return true;
+  // pnpm workspace 协议：workspace:* 表示链接到工作区内的包，其版本恒等于工作区版本，
+  // 并不表达「版本范围约束」。此前未加处理会被误判为不兼容（❌ 当前版本不兼容）。
+  // workspace:^1.2.3 / workspace:~1.2.3 则按其内部范围判定。
+  if (range.startsWith('workspace:')) {
+    const inner = range.slice('workspace:'.length).trim();
+    if (!inner || inner === '*') return true;
+    return satisfies(inner, ver);
+  }
   const V = parseV(ver);
   if (!V) return false;
   if (range.includes('||')) return range.split('||').some((r) => satisfies(r.trim(), ver));

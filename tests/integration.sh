@@ -12,6 +12,7 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "$0")/.." && pwd)/bin"
+TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 MOCK="$TMP/.dsh"
@@ -29,7 +30,7 @@ echo "== 1) 语法检查 =="
 for f in "$BIN_DIR/dsh-manage.sh" "$BIN_DIR/pin-runtime.sh"; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $f"; else bad "bash -n $f"; fi
 done
-for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs"; do
+for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs" "$BIN_DIR/scan-plugin-api.mjs"; do
   if node --check "$f" 2>/dev/null; then ok "node --check $f"; else bad "node --check $f"; fi
 done
 
@@ -88,7 +89,16 @@ if SOUT="$(DSH_HOME="$MOCK" node "$BIN_DIR/scan-adapters.mjs" 2>&1)"; then
   ok "scan-adapters 正常运行（退出 0）"
 else
   bad "scan-adapters 异常退出"; fi
-printf '%s\n' "$SOUT" | grep -q "未声明 dsh 范围\|无已装 adapter\|adapter" >/dev/null 2>&1 && true
+printf '%s\n' "$SOUT" | grep -q "未声明 dsh 范围\|无已装 adapter\|adapter" >/dev/null 2>&1 || true
+
+echo "== 6) scan-plugin-api.mjs（插件 API 冲突预检）=="
+if POUT="$(bash "$TESTS_DIR/plugin-api.sh" 2>&1)"; then
+  ok "插件 API 冲突预检集成测试通过"
+  printf '%s\n' "$POUT" | grep -E "通过 / " | sed 's/^/      /'
+else
+  bad "插件 API 冲突预检集成测试失败"
+  printf '%s\n' "$POUT" | sed 's/^/      /'
+fi
 
 echo
 echo "集成测试结果： $pass 通过 / $fail 失败"

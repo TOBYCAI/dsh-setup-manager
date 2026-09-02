@@ -75,7 +75,8 @@ dsh-setup-manager/
 │   ├── pin-runtime.sh         # Pin runtime as authority (shell/profile symlinks → runtime)
 │   ├── dsh-manage.sh          # Unified: runtime/shell upgrade · web · status · doctor · rollback · scan · check
 │   ├── verify-heal.mjs        # Verify key packages still resolve to runtime after heal
-│   └── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
+│   ├── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
+│   └── scan-plugin-api.mjs    # Statically diff plugins' runtime API imports to pre-check startup-breaking conflicts
 └── docs/
 ```
 
@@ -167,7 +168,7 @@ node bin/verify-heal.mjs
 # Show current versions and available updates
 dsm status
 
-# Scan installed adapters vs runtime compatibility before upgrading (predicts if @next/@latest falls out of range)
+# Scan installed adapters vs runtime compatibility before upgrading (incl. static pre-check of plugin↔runtime API imports, predicts startup-breaking conflicts)
 dsm scan
 # Report-only mode (wire into crontab for daily self-check; changes nothing)
 dsm check --cron
@@ -192,8 +193,8 @@ dsm update --dry-run
 | `update-runtime <ver>` | Single-step non-interactive runtime upgrade to a version | write |
 | `update-src [<ver>]` | Build & install from official GitHub source (for versions not yet on npm; no arg probes the latest dsh-v* tag) | write |
 | `shell` | Upgrade the desktop shell (download, backup, replace; Linux/Windows framework in place, marked unverified) | write |
-| `web` | Launch web (auto-unload safe-delete guard so pnpm isn't blocked) | launches process |
-| `scan` | Scan installed LLM adapters vs runtime dsh version semver range | read-only |
+| `web` | Launch web (auto-unload safe-delete guard; statically pre-checks plugin↔runtime API conflicts before launch — blocks on a hit, `--force` bypasses) | launches process |
+| `scan` | Scan installed LLM adapters vs runtime dsh version semver range; also statically diff plugins' runtime API imports to pre-check conflicts that would crash startup | read-only |
 | `check [--cron]` | Report-only self-check (wire into a scheduled task) | read-only |
 | `doctor` | Self-check symlink targets / backup dirs / guards / versions (backups listed with real path + size) | read-only |
 | `rollback [runtime\|shell\|all]` | Restore from `bundle-bak-*` / `shell-bak-*` | write |

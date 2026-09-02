@@ -75,7 +75,8 @@ dsh-setup-manager/
 │   ├── pin-runtime.sh         # 钉死 runtime 权威（壳/Profile 软链 → runtime）
 │   ├── dsh-manage.sh          # 统一管理：runtime/壳升级 · web · status · doctor · rollback · scan · check
 │   ├── verify-heal.mjs        # 校验 heal 后关键包是否仍解析到 runtime
-│   └── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
+│   ├── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
+│   └── scan-plugin-api.mjs    # 静态比对插件对 runtime 的 API 导入，预检启动会崩的冲突
 └── docs/
 ```
 
@@ -165,7 +166,7 @@ node bin/verify-heal.mjs
 # 查看当前版本与可用更新
 dsm status
 
-# 升级前先扫描已装 adapter 与 runtime 的兼容性（预测 @next/@latest 是否掉范围）
+# 升级前先扫描已装 adapter 与 runtime 的兼容性（含插件对 runtime API 导入的静态预检，预测启动会崩的冲突）
 dsm scan
 # 仅报告模式（可挂 crontab 每天自检，不改动任何东西）
 dsm check --cron
@@ -190,8 +191,8 @@ dsm update --dry-run
 | `update-runtime <ver>` | 单步非交互升级 runtime 到指定版本 | 写 |
 | `update-src [<ver>]` | 从官方 GitHub 源码构建安装（npm 未发布时可用；缺省探测最新 dsh-v* tag） | 写 |
 | `shell` | 升级桌面壳（下载备份替换；Linux/Windows 框架已就位，标注未验证） | 写 |
-| `web` | 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截） | 启动进程 |
-| `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围 | 只读 |
+| `web` | 启动 web（自动卸载 safe-delete 守卫；启动前静态预检插件↔runtime API 冲突，命中则阻止启动，`--force` 可绕过） | 启动进程 |
+| `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围；并静态比对插件对 runtime 的 API 导入，预检可能导致启动崩溃的冲突 | 只读 |
 | `check [--cron]` | 仅报告模式自检（可挂定时任务） | 只读 |
 | `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本（备份列出真实路径与大小） | 只读 |
 | `rollback [runtime\|shell\|all]` | 从 `bundle-bak-*` / `shell-bak-*` 还原 | 写 |

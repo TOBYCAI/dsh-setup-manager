@@ -23,7 +23,7 @@
 #   dsh-manage.sh update-runtime <ver>       非交互：直接升级 runtime 到指定版本
 #   dsh-manage.sh update-src [<ver>]         从官方 GitHub 源码构建安装（npm 未发布时可用；缺省探测最新 dsh-v* tag）
 #   dsh-manage.sh shell                      检测壳版本，交互确认后升级（按平台分发）
-#   dsh-manage.sh web [args..]               启动 dsh web（带 safe-delete 守卫卸载）
+#   dsh-manage.sh web [args..]               启动 dsh web（启动前插件 API 冲突预检；--force 跳过拦截）
 #   dsh-manage.sh pin                        仅重钉 runtime（壳/Profile 软链 → runtime）
 #   dsh-manage.sh status                     打印当前 runtime / 壳版本与更新可用性
 #   dsh-manage.sh doctor                     自检：软链完整性 / heal 是否仍指向 runtime / 守卫 / 备份
@@ -474,6 +474,17 @@ _dsh_shell_upgrade_windows() {
 }
 
 # ---- 启动 web（卸载 safe-delete 守卫）----
+# ---- 插件 API 冲突预检（runtime 升级后 / dsh web 启动前）----
+# 静态比对「插件 import 的符号」与「runtime 实际导出的符号」。
+# 命中冲突时插件树加载会抛 SyntaxError，整个 profile 起不来，故须在启动前拦住。
+# 退出码: 0=无阻塞冲突  1=有阻塞冲突  2=环境不满足（视为跳过）
+_dsh_plugin_api_check() {
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$BIN_DIR/scan-plugin-api.mjs" ]; then
+    return 2
+  fi
+  node "$BIN_DIR/scan-plugin-api.mjs" "$@"
+}
+
 _dsh_web() {
   _dsh_check_update
   local cands=() seen="" v
@@ -496,6 +507,28 @@ _dsh_web() {
   elif [ ${#cands[@]} -gt 0 ]; then
     echo "ℹ 检测到 runtime 更新可用（$_DSH_INST → ${cands[*]}），非交互环境未自动升级。"
   fi
+  # 启动前的插件 API 冲突预检：比对插件 import 的符号与 runtime 实际导出的符号。
+  # 命中冲突时插件树加载会崩，默认阻止启动；--force 是 dsm 自己的参数，须从传给 dsh web 的参数中剥离。
+  local api_force=0 a
+  local web_args=()
+  for a in "$@"; do
+    case "$a" in
+      --force) api_force=1 ;;
+      *) web_args+=("$a") ;;
+    esac
+  done
+  if [ -f "$BIN_DIR/scan-plugin-api.mjs" ] && command -v node >/dev/null 2>&1; then
+    if ! _dsh_plugin_api_check --quiet; then
+      if [ "$api_force" = "1" ]; then
+        echo "⚠ 已按 --force 跳过冲突拦截，启动可能失败。"
+      else
+        echo ""
+        echo "已阻止启动：上述插件与当前 runtime 不兼容，加载时会导致 profile 崩溃。"
+        echo "请先升级冲突插件或回滚 runtime；确认无碍可加 --force 强制启动。"
+        return 1
+      fi
+    fi
+  fi
   # 关键：动态卸载宿主注入的 safe-delete 批量删除守卫（覆盖所有 CODEBUDDY_SAFE_DELETE* / SAFE_DELETE_BULK*），
   # 避免 dsh web → plugin-manager → pnpm 清理临时目录时因 >50 文件批量删除确认而无法确认导致更新失败。
   local guard_args=()
@@ -503,7 +536,7 @@ _dsh_web() {
     [ -n "$line" ] && guard_args+=("$line")
   done < <(_dsh_guard_unset_args)
   env "${guard_args[@]}" -u CODEBUDDY_SESSION_ID -u CODEBUDDY_TOOL_CALL_ID \
-      dsh web ${DSH_PATCH_YML:+"--patch" "$DSH_PATCH_YML"} "$@"
+      dsh web ${DSH_PATCH_YML:+"--patch" "$DSH_PATCH_YML"} "${web_args[@]}"
 }
 
 # ---- 跨平台 realpath（macOS /bin/bash 的 readlink 不支持 -f）----
@@ -904,14 +937,16 @@ case "$cmd" in
         elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 ${_DSH_INST}；可用: ${cands[*]}）。"
         else for v in "${cands[@]}"; do
           _dsh_space_estimate_npm "$v"
-          if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then _dsh_do_upgrade "$v" || echo "⚠ $v 失败"; else echo "  跳过 $v"; fi
+          if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then
+            if _dsh_do_upgrade "$v"; then _dsh_plugin_api_check || true; else echo "⚠ $v 失败"; fi
+          else echo "  跳过 $v"; fi
         done; fi
       fi
     fi
     ;;
   update-runtime)
     _dsh_space_estimate_npm "${1:-}" 2>/dev/null || true
-    _dsh_do_upgrade "${1:-}"
+    if _dsh_do_upgrade "${1:-}"; then _dsh_plugin_api_check || true; fi
     ;;
   update-src)
     _dsh_check_update
@@ -948,7 +983,11 @@ case "$cmd" in
   web) _dsh_web "$@" ;;
   pin) zsh "$BIN_DIR/pin-runtime.sh" 2>/dev/null || bash "$BIN_DIR/pin-runtime.sh" ;;
   doctor) _dsh_doctor ;;
-  scan) node "$BIN_DIR/scan-adapters.mjs" "$@" ;;
+  scan)
+    node "$BIN_DIR/scan-adapters.mjs" "$@"
+    echo ""
+    node "$BIN_DIR/scan-plugin-api.mjs" "$@"
+    ;;
   check)
     _dsh_check_update; _dsh_shell_check
     cron=0; [ "${1:-}" = "--cron" ] && cron=1
@@ -965,6 +1004,8 @@ case "$cmd" in
       echo "更新可用: ${upd:-无}"
       echo "--- 自检 ---"
       _dsh_doctor || true
+      echo "--- 插件 API 兼容性 ---"
+      _dsh_plugin_api_check || true
     fi
     ;;
   rollback) _dsh_rollback "${1:-runtime}" ;;
@@ -975,5 +1016,5 @@ case "$cmd" in
     echo "runtime 当前: ${_DSH_INST:-未知} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
     echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
     ;;
-  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
+  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [--force] [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
 esac
