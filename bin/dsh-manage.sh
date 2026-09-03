@@ -28,7 +28,7 @@
 #   dsh-manage.sh status                     打印当前 runtime / 壳版本与更新可用性
 #   dsh-manage.sh doctor                     自检：软链完整性 / heal 是否仍指向 runtime / 守卫 / 备份
 #   dsh-manage.sh scan                        扫描已装 LLM adapter 与当前 runtime 的版本兼容性
-#   dsh-manage.sh check [--cron]             健康检查 + 更新可用性（默认仅报告，不自动改）
+#   dsh-manage.sh check [--cron]             健康检查 + 更新可用性 + 插件/Desktop 兼容性（默认仅报告，不自动改）
 #   dsh-manage.sh rollback [runtime|shell|all]  从备份还原（交互确认）
 #   dsh-manage.sh cleanup [--dry-run]           交互式清理备份（选择删除 / 保留）
 #   dsh-manage.sh install [--runtime <ver>] [--no-shell] [--no-runtime] [--dry-run]
@@ -197,8 +197,15 @@ _dsh_do_upgrade() {
   fi
   # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
   _dsh_src_restore "$wanted"
-  local link; link="$(readlink "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh" 2>/dev/null || true)"
-  base="$(dirname "$(dirname "$(dirname "${link:-$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh}")")")"
+  # 升级基准目录 = toolkit 受管的 runtime 项目根（package.json 所在）。
+  # 旧逻辑从 profiles 软链 readlink+dirname×3 解析，在源码视图布局
+  # （runtime/node_modules 为指向 runtime-src/<ver> 的软链）下会误解析到
+  # runtime-src（无 package.json），导致 pnpm install 报 ERR_PNPM_NO_PKG_MANIFEST。
+  base="$DSH_HOME/runtime"
+  if [ ! -f "$base/package.json" ]; then
+    echo "✗ $base 下没有 package.json，runtime 安装结构异常。" >&2
+    return 1
+  fi
   pnpm="$(_dsh_pnpm)"
   echo "→ 升级共享安装 $base → @deepseek-ai/dsh@$wanted"
   # 用「删 node_modules + lockfile 后联网重解析」确保整棵依赖树干净一致，
@@ -219,6 +226,12 @@ _dsh_do_upgrade() {
   fi
   echo "✓ 完成 → ${got}（重新钉死壳链接…）"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
+  # 升级后立即报告 Desktop 兼容性：Desktop 与 CLI 共享 runtime，新 runtime 可能
+  # 与已装 Desktop 的 asar 清单 / 应用代码不兼容（两层故障都会让 Desktop 启动即崩）。
+  if [ -d "${DSH_DESKTOP_APP:-/Applications/DSH Desktop.app}" ]; then
+    echo ""
+    _dsh_desktop_check || true
+  fi
   return 0
 }
 
@@ -483,6 +496,18 @@ _dsh_plugin_api_check() {
     return 2
   fi
   node "$BIN_DIR/scan-plugin-api.mjs" "$@"
+}
+
+# ---- Desktop 兼容性预检（runtime 升级后 / dsm check）----
+# Desktop 与 CLI 共享 runtime：runtime 升级可能让 Desktop 的 asar 清单缺包（第 1 层）
+# 或应用代码 import 的命名导出被 runtime 移除（第 2 层，如 settingsNamespace），
+# 两种情况都是主进程启动即崩。静态预检把故障提前到升级/巡检阶段。
+# 退出码: 0=兼容或未装 Desktop  1=致命冲突  2=环境不满足（视为跳过）
+_dsh_desktop_check() {
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$BIN_DIR/check-desktop.mjs" ]; then
+    return 2
+  fi
+  node "$BIN_DIR/check-desktop.mjs" "$@"
 }
 
 _dsh_web() {
@@ -1006,6 +1031,9 @@ case "$cmd" in
       _dsh_doctor || true
       echo "--- 插件 API 兼容性 ---"
       _dsh_plugin_api_check || true
+      echo ""
+      echo "--- Desktop 兼容性 ---"
+      _dsh_desktop_check || true
     fi
     ;;
   rollback) _dsh_rollback "${1:-runtime}" ;;
