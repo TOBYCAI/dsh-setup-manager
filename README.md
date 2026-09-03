@@ -77,6 +77,7 @@ dsh-setup-manager/
 │   ├── verify-heal.mjs        # 校验 heal 后关键包是否仍解析到 runtime
 │   ├── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
 │   └── scan-plugin-api.mjs    # 静态比对插件对 runtime 的 API 导入，预检启动会崩的冲突
+│   └── check-desktop.mjs      # 静态预检 Desktop 与共享 runtime 的兼容性（asar 清单差集 + 应用代码 API 导入）
 └── docs/
 ```
 
@@ -168,7 +169,10 @@ dsm status
 
 # 升级前先扫描已装 adapter 与 runtime 的兼容性（含插件对 runtime API 导入的静态预检，预测启动会崩的冲突）
 dsm scan
-# 仅报告模式（可挂 crontab 每天自检，不改动任何东西）
+# 仅报告模式（可挂 crontab 每天自检，不改动任何东西）；含插件与 Desktop 两类兼容性检查：
+#   - 插件 API：插件 import 的命名导出在 runtime 中是否存在（缺失则 dsh web 启动会崩）
+#   - Desktop 兼容性：Desktop 的 asar 清单与 runtime 包集合差集 + 应用代码 import 的
+#     命名导出是否仍存在（runtime 升级后 Desktop 启动即崩的两类故障都能提前暴露）
 dsm check --cron
 # 自检当前环境（软链 / 备份 / 守卫 / 版本）
 dsm doctor
@@ -193,7 +197,7 @@ dsm update --dry-run
 | `shell` | 升级桌面壳（下载备份替换；Linux/Windows 框架已就位，标注未验证） | 写 |
 | `web` | 启动 web（自动卸载 safe-delete 守卫；启动前静态预检插件↔runtime API 冲突，命中则阻止启动，`--force` 可绕过） | 启动进程 |
 | `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围；并静态比对插件对 runtime 的 API 导入，预检可能导致启动崩溃的冲突 | 只读 |
-| `check [--cron]` | 仅报告模式自检（可挂定时任务） | 只读 |
+| `check [--cron]` | 仅报告模式自检（可挂定时任务），含插件与 Desktop 兼容性 | 只读 |
 | `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本（备份列出真实路径与大小） | 只读 |
 | `rollback [runtime\|shell\|all]` | 从 `bundle-bak-*` / `shell-bak-*` 还原 | 写 |
 | `cleanup [--dry-run]` | 交互式清理备份：`bundle-bak-*` / `shell-bak-*` / `runtime-src` 源码缓存（在用版本受保护，不可删） | 写（dry-run 只读） |

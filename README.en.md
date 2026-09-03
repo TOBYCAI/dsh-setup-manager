@@ -77,6 +77,7 @@ dsh-setup-manager/
 │   ├── verify-heal.mjs        # Verify key packages still resolve to runtime after heal
 │   ├── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
 │   └── scan-plugin-api.mjs    # Statically diff plugins' runtime API imports to pre-check startup-breaking conflicts
+│   └── check-desktop.mjs      # Statically pre-check Desktop↔shared-runtime compatibility (asar manifest diff + app-code API imports)
 └── docs/
 ```
 
@@ -170,7 +171,10 @@ dsm status
 
 # Scan installed adapters vs runtime compatibility before upgrading (incl. static pre-check of plugin↔runtime API imports, predicts startup-breaking conflicts)
 dsm scan
-# Report-only mode (wire into crontab for daily self-check; changes nothing)
+# Report-only mode (wire into crontab for daily self-check; changes nothing); includes two compatibility checks:
+#   - Plugin API: whether named exports imported by plugins still exist in runtime (a miss crashes dsh web at startup)
+#   - Desktop compatibility: diff between Desktop's asar manifest and runtime packages, plus whether named
+#     exports imported by Desktop app code still exist (catches both runtime-upgrade failure modes up front)
 dsm check --cron
 # Self-check the current environment (symlinks / backups / guards / versions)
 dsm doctor
@@ -195,7 +199,7 @@ dsm update --dry-run
 | `shell` | Upgrade the desktop shell (download, backup, replace; Linux/Windows framework in place, marked unverified) | write |
 | `web` | Launch web (auto-unload safe-delete guard; statically pre-checks plugin↔runtime API conflicts before launch — blocks on a hit, `--force` bypasses) | launches process |
 | `scan` | Scan installed LLM adapters vs runtime dsh version semver range; also statically diff plugins' runtime API imports to pre-check conflicts that would crash startup | read-only |
-| `check [--cron]` | Report-only self-check (wire into a scheduled task) | read-only |
+| `check [--cron]` | Report-only self-check (wire into a scheduled task), incl. plugin & Desktop compatibility | read-only |
 | `doctor` | Self-check symlink targets / backup dirs / guards / versions (backups listed with real path + size) | read-only |
 | `rollback [runtime\|shell\|all]` | Restore from `bundle-bak-*` / `shell-bak-*` | write |
 | `cleanup [--dry-run]` | Interactively clear backups: `bundle-bak-*` / `shell-bak-*` / `runtime-src` source caches (in-use version is protected and cannot be removed) | write (dry-run: read-only) |
