@@ -30,7 +30,7 @@ echo "== 1) 语法检查 =="
 for f in "$BIN_DIR/dsh-manage.sh" "$BIN_DIR/pin-runtime.sh"; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $f"; else bad "bash -n $f"; fi
 done
-for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs" "$BIN_DIR/scan-plugin-api.mjs"; do
+for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs" "$BIN_DIR/scan-plugin-api.mjs" "$BIN_DIR/check-native-addons.mjs"; do
   if node --check "$f" 2>/dev/null; then ok "node --check $f"; else bad "node --check $f"; fi
 done
 
@@ -98,6 +98,20 @@ if POUT="$(bash "$TESTS_DIR/plugin-api.sh" 2>&1)"; then
 else
   bad "插件 API 冲突预检集成测试失败"
   printf '%s\n' "$POUT" | sed 's/^/      /'
+fi
+
+echo "== 7) native addon 缺失/白名单回归测试 =="
+if NOUT="$(bash "$TESTS_DIR/native-addons.sh" 2>&1)"; then
+  ok "native addon 回归测试通过"
+else
+  bad "native addon 回归测试失败"; printf '%s\n' "$NOUT" | sed 's/^/      /'
+fi
+
+echo "== 8) runtime 安装事务与中断回滚 =="
+if TOUT="$(bash "$TESTS_DIR/runtime-transaction.sh" 2>&1)"; then
+  ok "runtime 事务回归测试通过"
+else
+  bad "runtime 事务回归测试失败"; printf '%s\n' "$TOUT" | sed 's/^/      /'
 fi
 
 echo

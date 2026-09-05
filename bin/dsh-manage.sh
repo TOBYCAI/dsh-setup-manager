@@ -27,6 +27,7 @@
 #   dsh-manage.sh pin                        仅重钉 runtime（壳/Profile 软链 → runtime）
 #   dsh-manage.sh status                     打印当前 runtime / 壳版本与更新可用性
 #   dsh-manage.sh doctor                     自检：软链完整性 / heal 是否仍指向 runtime / 守卫 / 备份
+#   dsh-manage.sh repair-native              仅重建已审计的启动必需 native addon 并验证加载
 #   dsh-manage.sh scan                        扫描已装 LLM adapter 与当前 runtime 的版本兼容性
 #   dsh-manage.sh check [--cron]             健康检查 + 更新可用性 + 插件/Desktop 兼容性（默认仅报告，不自动改）
 #   dsh-manage.sh rollback [runtime|shell|all]  从备份还原（交互确认）
@@ -95,6 +96,79 @@ _dsh_guard_unset_args() {
   local v; while IFS= read -r v; do
     [ -n "$v" ] && printf '%s\n' "-u" "$v"
   done < <(env | cut -d= -f1 | grep -E '^CODEBUDDY_SAFE_DELETE|^SAFE_DELETE_BULK' 2>/dev/null || true)
+}
+
+# ---- native addon 审计边界 + runtime 安装事务 ----
+# 依赖树仍默认 --ignore-scripts，避免任意三方包在安装时执行代码；只有
+# check-native-addons.mjs 内固定名称/版本/脚本三重匹配的包允许显式构建。
+_dsh_native_check() {
+  local root="${1:-$DSH_HOME/runtime}"
+  command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/check-native-addons.mjs" ] \
+    || { echo "✗ native addon 检查器不可用" >&2; return 1; }
+  node "$BIN_DIR/check-native-addons.mjs" --root "$root"
+}
+
+_dsh_native_repair() {
+  local root="${1:-$DSH_HOME/runtime}"
+  command -v npm >/dev/null 2>&1 || { echo "✗ native addon 构建需要 npm/node-gyp" >&2; return 1; }
+  node "$BIN_DIR/check-native-addons.mjs" --root "$root" --repair
+}
+
+_dsh_tx_begin() {
+  local base="$1" f
+  _DSM_TX_DIR="$(mktemp -d "$DSH_HOME/.dsm-runtime-tx.XXXXXX")" || return 1
+  for f in package.json pnpm-lock.yaml package-lock.json pnpm-workspace.yaml; do
+    if [ -e "$base/$f" ]; then cp -p "$base/$f" "$_DSM_TX_DIR/$f"; else : > "$_DSM_TX_DIR/.absent-$f"; fi
+  done
+  [ ! -e "$base/node_modules" ] || mv "$base/node_modules" "$_DSM_TX_DIR/node_modules"
+  _DSM_TX_BASE="$base"
+  printf '%s\n' "$base" > "$_DSM_TX_DIR/runtime-base"
+  trap '_dsh_tx_on_exit' EXIT INT TERM HUP
+  echo "→ 已建立可回滚安装事务：$_DSM_TX_DIR"
+}
+
+_dsh_tx_on_exit() {
+  if [ -n "${_DSM_TX_DIR:-}" ] && [ -d "$_DSM_TX_DIR" ]; then
+    echo "⚠ 安装事务被中断，正在自动恢复…" >&2
+    _dsh_tx_rollback "${_DSM_TX_BASE:-$DSH_HOME/runtime}"
+  fi
+}
+
+_dsh_tx_rollback() {
+  local base="$1" f
+  [ -n "${_DSM_TX_DIR:-}" ] && [ -d "$_DSM_TX_DIR" ] || return 0
+  [ ! -e "$base/node_modules" ] || mv "$base/node_modules" "$_DSM_TX_DIR/failed-node_modules"
+  for f in package.json pnpm-lock.yaml package-lock.json pnpm-workspace.yaml; do
+    rm -f "$base/$f"
+    [ ! -e "$_DSM_TX_DIR/$f" ] || cp -p "$_DSM_TX_DIR/$f" "$base/$f"
+  done
+  [ ! -e "$_DSM_TX_DIR/node_modules" ] || mv "$_DSM_TX_DIR/node_modules" "$base/node_modules"
+  local finished="$_DSM_TX_DIR"
+  _DSM_TX_DIR=""
+  _DSM_TX_BASE=""
+  rm -rf "$finished" 2>/dev/null || echo "  ⚠ 回滚完成，但事务残留未能清理：$finished" >&2
+  echo "✓ 安装失败，已恢复升级前 runtime"
+}
+
+_dsh_tx_commit() {
+  local finished="${_DSM_TX_DIR:-}"
+  _DSM_TX_DIR=""
+  _DSM_TX_BASE=""
+  [ -z "$finished" ] || [ ! -d "$finished" ] || rm -rf "$finished" 2>/dev/null \
+    || echo "⚠ 升级已提交，但旧事务目录未能清理：$finished（可稍后 dsm cleanup）" >&2
+  return 0
+}
+
+_dsh_recover_orphan_tx() {
+  local tx base
+  tx="$(find "$DSH_HOME" -maxdepth 1 -type d -name '.dsm-runtime-tx.*' 2>/dev/null | sort | tail -1 || true)"
+  [ -n "$tx" ] || return 0
+  base="$DSH_HOME/runtime"
+  [ ! -f "$tx/runtime-base" ] || base="$(head -n1 "$tx/runtime-base")"
+  case "$base" in "$DSH_HOME"/runtime) ;; *) echo "✗ 拒绝恢复目标异常的事务：$tx" >&2; return 1 ;; esac
+  echo "⚠ 检测到上次被强制中断的安装事务，自动恢复旧 Runtime：$tx"
+  _DSM_TX_DIR="$tx"; _DSM_TX_BASE="$base"
+  _dsh_tx_rollback "$base"
 }
 
 # ---- 一次拉取 next/latest 两个 dist-tag ----
@@ -195,8 +269,6 @@ _dsh_do_upgrade() {
     echo "✗ registry 找不到 @deepseek-ai/dsh@${wanted}，跳过（版本未发布或拼写错误）。"
     return 1
   fi
-  # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
-  _dsh_src_restore "$wanted"
   # 升级基准目录 = toolkit 受管的 runtime 项目根（package.json 所在）。
   # 旧逻辑从 profiles 软链 readlink+dirname×3 解析，在源码视图布局
   # （runtime/node_modules 为指向 runtime-src/<ver> 的软链）下会误解析到
@@ -206,24 +278,30 @@ _dsh_do_upgrade() {
     echo "✗ $base 下没有 package.json，runtime 安装结构异常。" >&2
     return 1
   fi
+  _dsh_tx_begin "$base" || return 1
+  # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
+  if ! _dsh_src_restore "$wanted"; then _dsh_tx_rollback "$base"; return 1; fi
   pnpm="$(_dsh_pnpm)"
   echo "→ 升级共享安装 $base → @deepseek-ai/dsh@$wanted"
   # 用「删 node_modules + lockfile 后联网重解析」确保整棵依赖树干净一致，
   # 避免复用旧扁平目录导致遗留孤儿包（历史上曾因 rc.1 孤儿 adapter 触发接口报错）。
   if [ -n "$pnpm" ]; then
-    ( cd "$base" && rm -rf node_modules pnpm-lock.yaml \
+    ( cd "$base" && rm -f pnpm-lock.yaml \
       && "$pnpm" install --shamefully-hoist --ignore-scripts )
   else
-    ( cd "$base" && rm -rf node_modules package-lock.json \
+    ( cd "$base" && rm -f package-lock.json \
       && npm install --save-exact "@deepseek-ai/dsh@$wanted" --no-audit --no-fund --ignore-scripts )
   fi
   local rc=$?
-  if [ $rc -ne 0 ]; then echo "✗ 升级失败（退出 ${rc}），当前安装未改动。"; return 1; fi
+  if [ $rc -ne 0 ]; then echo "✗ 升级失败（退出 ${rc}）。"; _dsh_tx_rollback "$base"; return 1; fi
+  if ! _dsh_native_repair "$base"; then echo "✗ native addon 构建/加载验证失败。"; _dsh_tx_rollback "$base"; return 1; fi
   local got; got="$(dsh --version 2>/dev/null | head -n1)"
   if [ "$got" != "$wanted" ]; then
     echo "⚠ 升级后版本=${got}（期望 ${wanted}）。可重跑 dsh-manage.sh pin 重新钉死。"
+    _dsh_tx_rollback "$base"
     return 1
   fi
+  _dsh_tx_commit
   echo "✓ 完成 → ${got}（重新钉死壳链接…）"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
   # 升级后立即报告 Desktop 兼容性：Desktop 与 CLI 共享 runtime，新 runtime 可能
@@ -281,6 +359,7 @@ _dsh_gh_check() {
     fi
   done
   _DSH_GH_NEW="$best"
+  return 0
 }
 
 # ---- 从官方 GitHub 源码构建安装 runtime 到 $1（版本号如 0.1.2-alpha.1）----
@@ -317,16 +396,18 @@ _dsh_do_upgrade_src() {
   echo "→ 安装 monorepo 依赖并完整构建（首次较慢，请耐心等待）..."
   ( cd "$src_dir" && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0 \
     && "$pnpm" install --ignore-scripts 2>&1 | tail -3 \
+    && node "$BIN_DIR/check-native-addons.mjs" --root "$src_dir" --repair \
     && "$pnpm" run build 2>&1 | tail -3 ) \
     || { echo "✗ 依赖安装或构建失败（可在 ${src_dir} 手动排查后重跑）"; return 1; }
 
-  # 3) 备份当前 runtime 的 package.json（npm 升级时用于恢复）
+  # 3) 备份当前 runtime 的 package.json（npm 升级时用于恢复），并建立失败回滚点
   local bak="$DSH_HOME/runtime-src/backup"
   if [ -f "$rt_dir/package.json" ]; then
     mkdir -p "$bak"
     cp "$rt_dir/package.json" "$bak/package.json"
     echo "→ 已备份原 package.json -> ${bak}/package.json"
   fi
+  _dsh_tx_begin "$rt_dir" || return 1
 
   # 4) runtime 挂载源码目录为 pnpm workspace（用相对路径，pnpm glob 不支持绝对路径）
   local rel_src
@@ -352,20 +433,27 @@ EOF
   # 6) 重装（--shamefully-hoist 保持 node_modules/@deepseek-ai 完整闭包，与 pin 布局一致）
   echo "→ 安装 ${wanted} 到 runtime（--shamefully-hoist）..."
   ( cd "$rt_dir" && export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0 \
-    && rm -rf node_modules pnpm-lock.yaml \
+    && rm -f pnpm-lock.yaml \
     && "$pnpm" install --shamefully-hoist --ignore-scripts 2>&1 | tail -4 ) \
-    || { echo "✗ runtime 安装失败；可恢复备份 package.json 后重试"; return 1; }
+    || { echo "✗ runtime 安装失败"; _dsh_tx_rollback "$rt_dir"; return 1; }
+  if ! _dsh_native_repair "$rt_dir"; then
+    echo "✗ native addon 构建/加载验证失败"
+    _dsh_tx_rollback "$rt_dir"
+    return 1
+  fi
 
   # 7) 重钉壳链接 + 验证
   echo "→ 重新钉死壳链接..."
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
   local got; got="$(dsh --version 2>/dev/null | head -n1)"
   if [ "$got" = "$wanted" ]; then
+    _dsh_tx_commit
     echo "✓ 完成 → ${got}（源码安装 dsh-v${wanted}）"
     return 0
   fi
   echo "⚠ 安装完成但版本检测=${got:-未知}（期望 ${wanted}）。可重跑 dsh-manage.sh pin。"
-  return 0
+  _dsh_tx_rollback "$rt_dir"
+  return 1
 }
 
 # ---- 恢复源码安装前的 runtime package.json（npm 升级前调用）----
@@ -418,6 +506,7 @@ _dsh_shell_check() {
     _DSH_SHELL_LATEST="$(printf '%s' "$rel" | DSH_ASSET_RX="$rx" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=(JSON.parse(s).tag_name||"").replace(/^v/,"")}catch(e){}console.log(v)})' 2>/dev/null)"
     _DSH_SHELL_URL="$(printf '%s' "$rel" | DSH_ASSET_RX="$rx" node -e 'const rx=new RegExp(process.env.DSH_ASSET_RX,"i");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const a=(j.assets||[]).find(x=>rx.test(x.name));console.log(a?a.browser_download_url:(j.html_url||""))}catch(e){console.log("")}})' 2>/dev/null)"
   fi
+  return 0
 }
 
 # ---- 壳升级（按平台分发）----
@@ -532,6 +621,11 @@ _dsh_web() {
   elif [ ${#cands[@]} -gt 0 ]; then
     echo "ℹ 检测到 runtime 更新可用（$_DSH_INST → ${cands[*]}），非交互环境未自动升级。"
   fi
+  if ! _dsh_native_check "$DSH_HOME/runtime"; then
+    echo "已阻止启动：Runtime 的 native addon 缺失或与当前 Node/CPU ABI 不匹配。"
+    echo "请先运行 dsm repair-native；若版本不在审计白名单中，请升级 setup-manager。"
+    return 1
+  fi
   # 启动前的插件 API 冲突预检：比对插件 import 的符号与 runtime 实际导出的符号。
   # 命中冲突时插件树加载会崩，默认阻止启动；--force 是 dsm 自己的参数，须从传给 dsh web 的参数中剥离。
   local api_force=0 a
@@ -588,7 +682,14 @@ _dsh_doctor() {
     fi
     rm -f "$log"
   fi
-  # 2) profiles / app 的 @deepseek-ai/* 软链是否真指向 runtime（顺着软链链解析，避免假阳性）
+  # 2) 启动必需的 native addon 必须可被当前 Node ABI 真实加载
+  if _dsh_native_check "$DSH_HOME/runtime"; then
+    echo "  [OK]   native addon 与当前 Node/CPU ABI 匹配"
+  else
+    echo "  [FAIL] native addon 缺失或 ABI 不匹配（运行 dsm repair-native）"
+    fail=1
+  fi
+  # 3) profiles / app 的 @deepseek-ai/* 软链是否真指向 runtime（顺着软链链解析，避免假阳性）
   #    仅校验 runtime 中真实存在的包；app-only 包（runtime 无）本就该指向壳，不误报
   local base l rp2 realp rtlist name
   base="$(_dsh_profiles_ad)"
@@ -616,8 +717,8 @@ _dsh_doctor() {
     done
   fi
   # 4) 当前 shell 是否仍导出 safe-delete 守卫（web 启动会自动卸载，仅提示）
-  local gv; gv="$(env | cut -d= -f1 | grep -E '^CODEBUDDY_SAFE_DELETE|^SAFE_DELETE_BULK' 2>/dev/null | tr '\n' ' ')"
-  [ -n "$gv" ] && echo "  [INFO] 当前 shell 导出了守卫变量: ${gv}（web 启动时会自动 unset）"
+  local gv; gv="$(env | cut -d= -f1 | grep -E '^CODEBUDDY_SAFE_DELETE|^SAFE_DELETE_BULK' 2>/dev/null | tr '\n' ' ' || true)"
+  if [ -n "$gv" ]; then echo "  [INFO] 当前 shell 导出了守卫变量: ${gv}（web 启动时会自动 unset）"; fi
   # 5) 版本与更新可用性
   _dsh_check_update; _dsh_shell_check
   echo "  runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
@@ -809,6 +910,7 @@ _dsh_bootstrap_runtime() {
   fi
   local rc=$?
   [ $rc -ne 0 ] && { echo "✗ runtime 引导失败（退出 ${rc}），未改动其他内容。"; return 1; }
+  _dsh_native_repair "$DSH_HOME/runtime" || { echo "✗ runtime native addon 构建/验证失败"; return 1; }
   echo "✓ runtime 引导完成 → $ver"
   # 确保 dsh 在 PATH：建 ~/.dsh/bin/dsh 软链（指向 runtime 内的 bin）
   binjs="$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js"
@@ -914,6 +1016,12 @@ _dsh_install() {
   echo "✓ 安装流程结束。后续维护：dsh-manage.sh update / shell / web / doctor / rollback"
 }
 
+if [ "${DSM_LIBRARY_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+_dsh_recover_orphan_tx
+
 cmd="${1:-status}"; shift || true
 case "$cmd" in
   update)
@@ -1007,6 +1115,7 @@ case "$cmd" in
     ;;
   web) _dsh_web "$@" ;;
   pin) zsh "$BIN_DIR/pin-runtime.sh" 2>/dev/null || bash "$BIN_DIR/pin-runtime.sh" ;;
+  repair-native) _dsh_native_repair "$DSH_HOME/runtime" ;;
   doctor) _dsh_doctor ;;
   scan)
     node "$BIN_DIR/scan-adapters.mjs" "$@"
@@ -1044,5 +1153,5 @@ case "$cmd" in
     echo "runtime 当前: ${_DSH_INST:-未知} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
     echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
     ;;
-  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [--force] [args..]|pin|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
+  *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [--force] [args..]|pin|repair-native|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
 esac

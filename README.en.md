@@ -8,7 +8,9 @@
 ![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-setup-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
-**One-stop install, upgrade, and maintenance for DeepSeek Harness (DSH)** — the desktop shell and web share a single `~/.dsh/runtime` engine, so one upgrade updates both ends, and the desktop opens with the latest plugins for the current runtime. This toolkit codifies that "single-engine, dual-end" model into reusable scripts, and fixes the common breakages that follow an upgrade (shell overwrites runtime, pnpm blocked by a safe-delete guard).
+**One-stop install, upgrade, and maintenance for DeepSeek Harness (DSH)** — the desktop shell and web share a single `~/.dsh/runtime` engine, so one upgrade updates both ends, and the desktop opens with the latest plugins for the current runtime. This toolkit codifies that "single-engine, dual-end" model into reusable scripts, and fixes common upgrade breakages: shell overrides, safe-delete interference, missing native modules, and half-installed runtimes.
+
+Starting with v1.11.0, arbitrary dependency lifecycle scripts remain disabled by default. Native addons required for DSH boot are built only through a strict name/version/script allowlist and then loaded under the current Node/CPU ABI. Every runtime upgrade creates a recoverable transaction; install failure, version mismatch, native verification failure, Ctrl-C, or terminal interruption restores the previous runtime.
 
 > **The ideal state this toolkit guarantees**
 > - Single engine for both ends: the desktop shell and web both symlink to the same `~/.dsh/runtime` — no two independent copies.
@@ -34,6 +36,7 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 | `@liustack/modlens` | `≤ 3.23.0` | old versions crash when rc.2 enforces `prepareCall` | rc.2 introduced an adapter API change; old modlens didn't implement `prepareCall` | ✅ **modlens ≥ 3.23.x fixes this natively** — just upgrade, no patch needed |
 | Any third-party (very old) LLM adapter plugin | didn't catch up to rc.2 contract | may throw `adapter.<method> is not a function` | rc.2 unified the adapter interface contract; very old plugins didn't catch up | ⚠️ Scan installed adapters' dsh version range with `bin/scan-adapters.mjs`; upgrade the plugin to a version supporting rc.2 |
 | `@deepseek-ai/dsh` itself | `0.1.1-rc.2` (with an old shell) | runtime silently overwritten / patches lost after a shell update | shell re-bundles dsh, heal closure re-points profiles symlinks back to the shell | ✅ Pin runtime as authority with `pin-runtime.sh` |
+| `fs-ext@2.1.1` | `0.1.3-alpha.1` source install | boot fails with `Cannot find module './build/Release/fs_ext.node'` | lifecycle scripts were disabled for supply-chain safety, but the required native addon was not built separately | ✅ v1.11.0 allowlist-builds and load-verifies it with rollback; run `dsm repair-native` for an existing install |
 | Desktop shell (`DSH Desktop.app`) | After any runtime upgrade | shell-bundled version drifts from runtime version | shell and runtime are decoupled and must be upgraded separately | ✅ Upgrade the shell alone with `dsh-manage.sh shell` |
 
 **How to read the table**:
@@ -75,6 +78,7 @@ dsh-setup-manager/
 │   ├── pin-runtime.sh         # Pin runtime as authority (shell/profile symlinks → runtime)
 │   ├── dsh-manage.sh          # Unified: runtime/shell upgrade · web · status · doctor · rollback · scan · check
 │   ├── verify-heal.mjs        # Verify key packages still resolve to runtime after heal
+│   ├── check-native-addons.mjs # Check/allowlist-repair native addons required at boot
 │   ├── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
 │   └── scan-plugin-api.mjs    # Statically diff plugins' runtime API imports to pre-check startup-breaking conflicts
 │   └── check-desktop.mjs      # Statically pre-check Desktop↔shared-runtime compatibility (asar manifest diff + app-code API imports)
@@ -134,7 +138,7 @@ dsm install --dry-run        # report what it would do, change nothing
 
 **After install you are in maintenance mode**: all later upgrades and self-checks reuse the same commands — `dsm install` (skips if already installed) / `dsm update` (runtime) / `dsm shell` (shell) / `dsm web` (launch) / `dsm doctor` (self-check) / `dsm rollback` / `dsm cleanup` (clear backups) / `dsm scan` (pre-upgrade compat) / `dsm check` (scheduled report). A machine only needs `dsm install` once.
 
-**Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` **do not crash even when DSH is not yet installed or `dsh` is off PATH** — version probing degrades gracefully to an "unknown" marker / a report instead of aborting. `doctor`'s symlink check is **version-agnostic**: the checklist is taken dynamically from the `@deepseek-ai` packages that actually exist in the runtime, so app-only packages (absent from runtime, correctly sourced from the shell) are never false-positive. The installed version is read from `~/.dsh/runtime/.../dsh/package.json` first (no PATH dependency, not swallowed by stderr), falling back to `dsh --version`.
+**Robustness notes**: the read-only commands `status` / `check` / `scan` / `doctor` do not silently abort when DSH is absent, `dsh` is off PATH, or an update service is temporarily unavailable. `doctor` now also loads boot-critical native addons and directs broken/ABI-mismatched installs to `repair-native`. Installed versions are read from the runtime package first, then fall back to `dsh --version`.
 
 ## Usage
 
@@ -178,6 +182,9 @@ dsm scan
 dsm check --cron
 # Self-check the current environment (symlinks / backups / guards / versions)
 dsm doctor
+
+# rebuild only audited, boot-critical native addons and verify they load
+dsm repair-native
 # Roll back from the most recent backup: runtime / shell / all
 dsm rollback runtime
 # Interactively clean up backups (lists bundle-bak-*/shell-bak-*, choose what to delete / keep; --dry-run just lists)
@@ -201,6 +208,7 @@ dsm update --dry-run
 | `scan` | Scan installed LLM adapters vs runtime dsh version semver range; also statically diff plugins' runtime API imports to pre-check conflicts that would crash startup | read-only |
 | `check [--cron]` | Report-only self-check (wire into a scheduled task), incl. plugin & Desktop compatibility | read-only |
 | `doctor` | Self-check symlink targets / backup dirs / guards / versions (backups listed with real path + size) | read-only |
+| `repair-native` | Allowlist-rebuild and load-test boot-critical native addons; refuses unknown versions or modified install scripts | writes |
 | `rollback [runtime\|shell\|all]` | Restore from `bundle-bak-*` / `shell-bak-*` | write |
 | `cleanup [--dry-run]` | Interactively clear backups: `bundle-bak-*` / `shell-bak-*` / `runtime-src` source caches (in-use version is protected and cannot be removed) | write (dry-run: read-only) |
 

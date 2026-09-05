@@ -17,3 +17,13 @@ jobs:
         run: for f in bin/*.sh; do bash -n "$f" || exit 1; done; echo "bash syntax OK"
       - name: node --check on mjs scripts
         run: for f in bin/*.mjs; do node --check "$f" || exit 1; done; echo "node syntax OK"
+      - name: Native addon policy tests
+        run: bash tests/native-addons.sh
+      - name: Runtime transaction tests
+        run: bash tests/runtime-transaction.sh
+      - name: Integration tests
+        run: bash tests/integration.sh
+      - name: Desktop compatibility tests
+        run: bash tests/desktop-check.sh
+      - name: Plugin API compatibility tests
+        run: bash tests/plugin-api.sh

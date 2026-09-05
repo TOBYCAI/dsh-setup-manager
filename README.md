@@ -8,7 +8,9 @@
 ![daily compat](https://img.shields.io/github/actions/workflow/status/TOBYCAI/dsh-setup-manager/compat.yml?branch=main&label=daily-compat&style=flat-square)
 ![Script](https://img.shields.io/badge/type-shell--toolkit-4d6bfe?style=flat-square)
 
-**一站式安装、升级与维护 DeepSeek Harness（DSH）**——桌面壳与 web 共用同一个 `~/.dsh/runtime` 引擎，一次升级两端同时生效，桌面打开即是当前 runtime 的最新插件。本工具把这套「单引擎双端」模型固化成可复用脚本，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截）。
+**一站式安装、升级与维护 DeepSeek Harness（DSH）**——桌面壳与 web 共用同一个 `~/.dsh/runtime` 引擎，一次升级两端同时生效，桌面打开即是当前 runtime 的最新插件。本工具把这套「单引擎双端」模型固化成可复用脚本，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截、原生模块缺失与半安装状态）。
+
+v1.11.0 起，Runtime 安装仍默认禁止任意依赖执行 lifecycle script，但会在严格的名称、版本和脚本三重白名单下构建 DSH 启动必需的 native addon，并用当前 Node/CPU ABI 实际加载验证。升级前会建立可恢复事务；安装失败、版本不符、native 验证失败、Ctrl-C 或终端中断都会恢复旧 Runtime。
 
 > **本工具保证的理想状态**
 > - 双端单引擎：桌面壳与 web 都软链到同一个 `~/.dsh/runtime`，不存在两份独立副本。
@@ -34,6 +36,7 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 | `@liustack/modlens` | `≤ 3.23.0` | rc.2 强制 `prepareCall` 时旧版本会崩 | rc.2 引入 adapter API 变更，旧 modlens 未实现 `prepareCall` | ✅ **modlens ≥ 3.23.x 已原生修复**，直接升级即可，无需补丁 |
 | 任意第三方（极老旧）LLM adapter 插件 | 未跟进 rc.2 接口契约 | 可能报 `adapter.<method> is not a function` | rc.2 统一了 adapter 接口契约，极老旧插件未跟进 | ⚠️ 用 `bin/scan-adapters.mjs` 扫描已装 adapter 的 dsh 版本范围；缺方法就升级该插件到支持 rc.2 的版本 |
 | `@deepseek-ai/dsh` 本体 | `0.1.1-rc.2`（配合旧壳） | 壳更新后 runtime 被静默覆盖、补丁丢失 | 壳内重新捆绑 dsh，heal 闭包把 profiles 软链指回壳 | ✅ 用 `pin-runtime.sh` 钉死 runtime 权威 |
+| `fs-ext@2.1.1` | `0.1.3-alpha.1` 源码安装 | 启动时报 `Cannot find module './build/Release/fs_ext.node'` | 安装器为供应链安全禁用了 lifecycle script，却未单独构建必需 native addon | ✅ v1.11.0 自动白名单构建、加载验证与失败回滚；既有安装可运行 `dsm repair-native` |
 | 桌面壳（`DSH Desktop.app`） | 任意 runtime 升级后 | 壳自带版本与 runtime 版本错位 | 壳与 runtime 解耦后需分别升级 | ✅ 用 `dsh-manage.sh shell` 单独升级壳 |
 
 **读表要点**：
@@ -75,6 +78,7 @@ dsh-setup-manager/
 │   ├── pin-runtime.sh         # 钉死 runtime 权威（壳/Profile 软链 → runtime）
 │   ├── dsh-manage.sh          # 统一管理：runtime/壳升级 · web · status · doctor · rollback · scan · check
 │   ├── verify-heal.mjs        # 校验 heal 后关键包是否仍解析到 runtime
+│   ├── check-native-addons.mjs # 检查/白名单修复启动必需的 native addon
 │   ├── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
 │   └── scan-plugin-api.mjs    # 静态比对插件对 runtime 的 API 导入，预检启动会崩的冲突
 │   └── check-desktop.mjs      # 静态预检 Desktop 与共享 runtime 的兼容性（asar 清单差集 + 应用代码 API 导入）
@@ -134,7 +138,7 @@ dsm install --dry-run          # 只报告将做什么，不改动
 
 **安装完即进入维护模式**：之后所有升级与自检都复用同一套命令——`dsm install`（已装则跳过）/ `dsm update`（升 runtime）/ `dsm shell`（升壳）/ `dsm web`（启动）/ `dsm doctor`（自检）/ `dsm rollback`（回滚）/ `dsm cleanup`（清理备份）/ `dsm scan`（升级前查兼容）/ `dsm check`（定时报告）。一台机器只需 `dsm install` 一次。
 
-**健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、或 `dsh` 不在 PATH 时也不会崩溃**——版本探测失败只降级为「未知」/ 优雅报告，不再中断。`doctor` 的软链校验是**版本无关**的：检查清单动态取自 runtime 中真实存在的 `@deepseek-ai` 包，app-only 包（runtime 中没有、本就该来自壳）不会误报。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`（不依赖 PATH、不被 stderr 吞），缺失时回退 `dsh --version`。
+**健壮性说明**：`status` / `check` / `scan` / `doctor` 等**只读命令在 DSH 尚未安装、`dsh` 不在 PATH 或更新服务暂时不可达时也不会静默中断**——版本探测失败只降级为「未知」/ 优雅报告。`doctor` 除了版本无关的软链检查，还会真实加载启动必需的 native addon，发现缺失或 Node ABI 不匹配时给出 `repair-native` 修复入口。已装版本优先读 `~/.dsh/runtime/.../dsh/package.json`，缺失时回退 `dsh --version`。
 
 ## 使用
 
@@ -176,6 +180,9 @@ dsm scan
 dsm check --cron
 # 自检当前环境（软链 / 备份 / 守卫 / 版本）
 dsm doctor
+
+# 只重建经过审计的必需 native addon，并立即验证可加载性
+dsm repair-native
 # 从最近的备份回滚：runtime / shell / all
 dsm rollback runtime
 # 交互式清理备份（列出 bundle-bak-*/shell-bak-*，选择删除 / 保留；--dry-run 仅查看）
@@ -199,6 +206,7 @@ dsm update --dry-run
 | `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围；并静态比对插件对 runtime 的 API 导入，预检可能导致启动崩溃的冲突 | 只读 |
 | `check [--cron]` | 仅报告模式自检（可挂定时任务），含插件与 Desktop 兼容性 | 只读 |
 | `doctor` | 自检软链指向 / 备份目录 / 守卫 / 版本（备份列出真实路径与大小） | 只读 |
+| `repair-native` | 白名单重建并加载验证 Runtime 启动必需的 native addon；拒绝未知版本或被篡改的安装脚本 | 写 |
 | `rollback [runtime\|shell\|all]` | 从 `bundle-bak-*` / `shell-bak-*` 还原 | 写 |
 | `cleanup [--dry-run]` | 交互式清理备份：`bundle-bak-*` / `shell-bak-*` / `runtime-src` 源码缓存（在用版本受保护，不可删） | 写（dry-run 只读） |
 
