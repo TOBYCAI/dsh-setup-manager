@@ -10,7 +10,7 @@
 
 **One-stop install, upgrade, and maintenance for DeepSeek Harness (DSH)** — the desktop shell and web share a single `~/.dsh/runtime` engine, so one upgrade updates both ends, and the desktop opens with the latest plugins for the current runtime. This toolkit codifies that "single-engine, dual-end" model into reusable scripts, and fixes common upgrade breakages: shell overrides, safe-delete interference, missing native modules, and half-installed runtimes.
 
-Starting with v1.11.0, arbitrary dependency lifecycle scripts remain disabled by default. Native addons required for DSH boot are built only through a strict name/version/script allowlist and then loaded under the current Node/CPU ABI. Every runtime upgrade creates a recoverable transaction; install failure, version mismatch, native verification failure, Ctrl-C, or terminal interruption restores the previous runtime.
+Arbitrary dependency lifecycle scripts remain disabled by default. Native addons required for DSH boot are built only through a strict name/version/script allowlist and then loaded under the current Node/CPU ABI. Every runtime upgrade creates a recoverable transaction; install failure, version mismatch, native verification failure, Ctrl-C, or terminal interruption restores the previous runtime.
 
 > **The ideal state this toolkit guarantees**
 > - Single engine for both ends: the desktop shell and web both symlink to the same `~/.dsh/runtime` — no two independent copies.
@@ -36,7 +36,7 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 | `@liustack/modlens` | `≤ 3.23.0` | old versions crash when rc.2 enforces `prepareCall` | rc.2 introduced an adapter API change; old modlens didn't implement `prepareCall` | ✅ **modlens ≥ 3.23.x fixes this natively** — just upgrade, no patch needed |
 | Any third-party (very old) LLM adapter plugin | didn't catch up to rc.2 contract | may throw `adapter.<method> is not a function` | rc.2 unified the adapter interface contract; very old plugins didn't catch up | ⚠️ Scan installed adapters' dsh version range with `bin/scan-adapters.mjs`; upgrade the plugin to a version supporting rc.2 |
 | `@deepseek-ai/dsh` itself | `0.1.1-rc.2` (with an old shell) | runtime silently overwritten / patches lost after a shell update | shell re-bundles dsh, heal closure re-points profiles symlinks back to the shell | ✅ Pin runtime as authority with `pin-runtime.sh` |
-| `fs-ext@2.1.1` | `0.1.3-alpha.1` source install | boot fails with `Cannot find module './build/Release/fs_ext.node'` | lifecycle scripts were disabled for supply-chain safety, but the required native addon was not built separately | ✅ v1.11.0 allowlist-builds and load-verifies it with rollback; run `dsm repair-native` for an existing install |
+| `fs-ext@2.1.1` | `0.1.3-alpha.1` source install | boot fails with `Cannot find module './build/Release/fs_ext.node'` | lifecycle scripts were disabled for supply-chain safety, but the required native addon was not built separately | ✅ Automatically allowlist-builds and load-verifies it with rollback; run `dsm repair-native` for an existing broken install |
 | Desktop shell (`DSH Desktop.app`) | After any runtime upgrade | shell-bundled version drifts from runtime version | shell and runtime are decoupled and must be upgraded separately | ✅ Upgrade the shell alone with `dsh-manage.sh shell` |
 
 **How to read the table**:

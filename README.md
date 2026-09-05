@@ -10,7 +10,7 @@
 
 **一站式安装、升级与维护 DeepSeek Harness（DSH）**——桌面壳与 web 共用同一个 `~/.dsh/runtime` 引擎，一次升级两端同时生效，桌面打开即是当前 runtime 的最新插件。本工具把这套「单引擎双端」模型固化成可复用脚本，并解决升级后常见的破坏性问题（壳覆盖 runtime、pnpm 被安全删除守卫拦截、原生模块缺失与半安装状态）。
 
-v1.11.0 起，Runtime 安装仍默认禁止任意依赖执行 lifecycle script，但会在严格的名称、版本和脚本三重白名单下构建 DSH 启动必需的 native addon，并用当前 Node/CPU ABI 实际加载验证。升级前会建立可恢复事务；安装失败、版本不符、native 验证失败、Ctrl-C 或终端中断都会恢复旧 Runtime。
+Runtime 安装默认禁止任意依赖执行 lifecycle script，仅在严格的名称、版本和脚本三重白名单下构建 DSH 启动必需的 native addon，并用当前 Node/CPU ABI 实际加载验证。升级前会建立可恢复事务；安装失败、版本不符、native 验证失败、Ctrl-C 或终端中断都会恢复旧 Runtime。
 
 > **本工具保证的理想状态**
 > - 双端单引擎：桌面壳与 web 都软链到同一个 `~/.dsh/runtime`，不存在两份独立副本。
@@ -36,7 +36,7 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 | `@liustack/modlens` | `≤ 3.23.0` | rc.2 强制 `prepareCall` 时旧版本会崩 | rc.2 引入 adapter API 变更，旧 modlens 未实现 `prepareCall` | ✅ **modlens ≥ 3.23.x 已原生修复**，直接升级即可，无需补丁 |
 | 任意第三方（极老旧）LLM adapter 插件 | 未跟进 rc.2 接口契约 | 可能报 `adapter.<method> is not a function` | rc.2 统一了 adapter 接口契约，极老旧插件未跟进 | ⚠️ 用 `bin/scan-adapters.mjs` 扫描已装 adapter 的 dsh 版本范围；缺方法就升级该插件到支持 rc.2 的版本 |
 | `@deepseek-ai/dsh` 本体 | `0.1.1-rc.2`（配合旧壳） | 壳更新后 runtime 被静默覆盖、补丁丢失 | 壳内重新捆绑 dsh，heal 闭包把 profiles 软链指回壳 | ✅ 用 `pin-runtime.sh` 钉死 runtime 权威 |
-| `fs-ext@2.1.1` | `0.1.3-alpha.1` 源码安装 | 启动时报 `Cannot find module './build/Release/fs_ext.node'` | 安装器为供应链安全禁用了 lifecycle script，却未单独构建必需 native addon | ✅ v1.11.0 自动白名单构建、加载验证与失败回滚；既有安装可运行 `dsm repair-native` |
+| `fs-ext@2.1.1` | `0.1.3-alpha.1` 源码安装 | 启动时报 `Cannot find module './build/Release/fs_ext.node'` | 安装器为供应链安全禁用了 lifecycle script，却未单独构建必需 native addon | ✅ 自动白名单构建、加载验证与失败回滚；既有异常安装可运行 `dsm repair-native` |
 | 桌面壳（`DSH Desktop.app`） | 任意 runtime 升级后 | 壳自带版本与 runtime 版本错位 | 壳与 runtime 解耦后需分别升级 | ✅ 用 `dsh-manage.sh shell` 单独升级壳 |
 
 **读表要点**：
