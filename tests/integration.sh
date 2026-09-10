@@ -27,10 +27,10 @@ ok()  { echo "  ✓ $1"; pass=$((pass+1)); }
 bad() { echo "  ✗ $1"; fail=$((fail+1)); }
 
 echo "== 1) 语法检查 =="
-for f in "$BIN_DIR/dsh-manage.sh" "$BIN_DIR/pin-runtime.sh"; do
+for f in "$BIN_DIR/dsh-manage.sh" "$BIN_DIR/pin-runtime.sh" "$BIN_DIR/app-mode.sh"; do
   if bash -n "$f" 2>/dev/null; then ok "bash -n $f"; else bad "bash -n $f"; fi
 done
-for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs" "$BIN_DIR/scan-plugin-api.mjs" "$BIN_DIR/check-native-addons.mjs"; do
+for f in "$BIN_DIR/verify-heal.mjs" "$BIN_DIR/scan-adapters.mjs" "$BIN_DIR/scan-plugin-api.mjs" "$BIN_DIR/check-native-addons.mjs" "$BIN_DIR/check-desktop.mjs"; do
   if node --check "$f" 2>/dev/null; then ok "node --check $f"; else bad "node --check $f"; fi
 done
 
@@ -113,6 +113,35 @@ if TOUT="$(bash "$TESTS_DIR/runtime-transaction.sh" 2>&1)"; then
 else
   bad "runtime 事务回归测试失败"; printf '%s\n' "$TOUT" | sed 's/^/      /'
 fi
+
+echo "== 9) pin-runtime.sh：自包含壳（≥2.0.7）必须跳过改造 .app，仅钉 profiles =="
+# 构造自包含壳：app.asar 正文 > 1MB（大小阈值）且 unpacked 下无软链农场
+SC="$TMP/selfcontained"; SCRT="$SC/.dsh/runtime/node_modules/@deepseek-ai"; SCAPP="$SC/app/node_modules/@deepseek-ai"
+SCH="$SC/.dsh"; SCPROF="$SCH/profiles/node_modules/@deepseek-ai"
+mkdir -p "$SCRT" "$SCAPP" "$SCPROF" "$SC/app"
+for p in "${PKGS[@]}"; do
+  mkdir -p "$SCRT/$p" "$SCAPP/$p"
+  printf '{"name":"@deepseek-ai/%s","version":"0.1.5-rc.1"}' "$p" > "$SCRT/$p/package.json"
+  printf '{"name":"@deepseek-ai/%s","version":"0.1.5-rc.1"}' "$p" > "$SCAPP/$p/package.json"
+done
+# 1.1MB 的假 asar（只验判定阈值；内容不参与判定）。
+# 路径层级对齐真实 .app：app-mode.sh 从 <scope>/../../.. 找 app.asar，即
+# <scope>=.../node_modules/@deepseek-ai 时 asar 在 .../app.asar（此处 = $SC/app.asar）。
+node -e 'require("fs").writeFileSync(process.argv[1], Buffer.alloc(1100000))' "$SC/app.asar"
+# assert_link 用全局 $RT 作比对基准，这里切到本场景的 runtime
+RT="$SCRT"
+SOUT="$(DSH_HOME="$SCH" DSH_APP_PKG="$SCAPP" bash "$BIN_DIR/pin-runtime.sh" 2>&1)" && SRC=0 || SRC=$?
+[ "$SRC" = "0" ] && ok "pin-runtime.sh 执行成功" || bad "pin-runtime.sh 失败（退出 $SRC）"
+printf '%s' "$SOUT" | grep -q "自包含" && ok "识别自包含并声明跳过 .app" || bad "未识别自包含：$SOUT"
+sc_n=0; sc_bad=0
+for p in "${PKGS[@]}"; do
+  if [ -L "$SCAPP/$p" ]; then sc_bad=$((sc_bad+1)); else sc_n=$((sc_n+1)); fi
+done
+[ "$sc_bad" -eq 0 ] && ok "未改动壳内目录（${sc_n} 个真实目录保持原样）" || bad "自包含模式仍改写了壳内 $sc_bad 个条目"
+assert_link "$SCPROF" "自包含壳的 profiles"
+# 反例：显式声明为共享软链（DSH_APP_SELF_CONTAINED=0）时应照旧改写 .app
+SOUT2="$(DSH_HOME="$SCH" DSH_APP_PKG="$SCAPP" DSH_APP_SELF_CONTAINED=0 bash "$BIN_DIR/pin-runtime.sh" 2>&1)" || true
+assert_link "$SCAPP" "强制 shared 时的 App 内"
 
 echo
 echo "集成测试结果： $pass 通过 / $fail 失败"

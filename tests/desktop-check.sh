@@ -77,6 +77,68 @@ mk_appcode() {
   printf '%s\n' "$code" > "$unpacked/lib/app.js"
 }
 
+# 真打包 asar（模式 B，Desktop ≥2.0.7）：清单 + 正文（文件按 offset 落在 dataOffset 之后）。
+# $2 = {"相对路径": "文件内容"} 的 JSON。
+mk_asar_packed() {
+  local path="$1" files="$2"
+  node -e '
+    const fs = require("fs");
+    const [path, filesJson] = process.argv.slice(1);
+    const files = JSON.parse(filesJson);
+    const root = { files: {} };
+    const put = (parts, entry) => {
+      let node = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!node.files[parts[i]]) node.files[parts[i]] = { files: {} };
+        node = node.files[parts[i]];
+      }
+      node.files[parts[parts.length - 1]] = entry;
+    };
+    let offset = 0;
+    const chunks = [];
+    for (const rel of Object.keys(files)) {
+      const buf = Buffer.from(files[rel], "utf8");
+      put(rel.split("/"), { size: buf.length, offset: String(offset) });
+      chunks.push(buf);
+      offset += buf.length;
+    }
+    const payload = Buffer.from(JSON.stringify(root), "utf8");
+    const padded = (payload.length + 3) & ~3;
+    const dataOffset = 16 + padded;
+    const head = Buffer.alloc(dataOffset);
+    head.writeUInt32LE(4, 0);
+    head.writeUInt32LE(padded + 8, 4);
+    head.writeUInt32LE(padded + 4, 8);
+    head.writeUInt32LE(payload.length, 12);
+    payload.copy(head, 16);
+    fs.writeFileSync(path, Buffer.concat([head, ...chunks]));
+  ' "$path" "$files"
+}
+
+mk_app_packed() {
+  local app="$1" ver="$2" files="$3"
+  local res="$app/Contents/Resources"
+  mkdir -p "$res"
+  if [ -n "$ver" ]; then
+    printf '<?xml version="1.0"?><plist><dict><key>CFBundleShortVersionString</key><string>%s</string></dict></plist>' "$ver" \
+      > "$app/Contents/Info.plist"
+  fi
+  mk_asar_packed "$res/app.asar" "$files"
+}
+
+# 自包含壳的 asar 内容：应用代码 + 壳自带 dsh 版本
+packed_files() {
+  local bundled="$1" appcode="$2"
+  node -e '
+    const [bundled, appcode] = process.argv.slice(1);
+    process.stdout.write(JSON.stringify({
+      "package.json": JSON.stringify({ name: "dsh-desktop", version: "2.0.7" }),
+      "lib/app.js": appcode,
+      "node_modules/@deepseek-ai/dsh/package.json": JSON.stringify({ name: "@deepseek-ai/dsh", version: bundled }),
+    }));
+  ' "$bundled" "$appcode"
+}
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -141,6 +203,48 @@ mk_appcode "$APP/Contents/Resources/app.asar.unpacked" \
 run_check --app "$APP" --dsh-home "$H" --quiet
 [ "$RC" = "0" ] && ok "无冲突时退出 0" || bad "退出码应为 0，实际 $RC"
 [ -z "$OUT" ] && ok "无冲突时静默（无输出）" || bad "静默模式不应有输出：$OUT"
+
+echo "== 场景 7) 真打包 asar（Desktop ≥2.0.7 自包含）→ 不跳过、应用代码从 asar 正文读出 =="
+H="$TMP/s7"; RT="$H/runtime/node_modules"; APP="$TMP/s7/DSH Desktop.app"
+mk_runtime "$RT"
+mkdir -p "$RT/@deepseek-ai/dsh/lib"
+printf '%s' '{"name":"@deepseek-ai/dsh","version":"0.1.2-rc.1","main":"./lib/index.js"}' \
+  > "$RT/@deepseek-ai/dsh/package.json"
+printf '%s\n' 'export const x = 1;' > "$RT/@deepseek-ai/dsh/lib/index.js"
+mk_app_packed "$APP" "2.0.7" "$(packed_files 9.9.9 'import { SettingsProvider } from "@deepseek-ai/dsh-settings";')"
+run_check --app "$APP" --dsh-home "$H"
+[ "$RC" = "0" ] && ok "退出码 0（未按「环境不满足」跳过）" || bad "退出码应为 0，实际 $RC"
+printf '%s' "$OUT" | grep -q "自包含" && ok "识别为自包含打包" || bad "未识别自包含"
+printf '%s' "$OUT" | grep -q "壳自带 dsh 副本 9.9.9" && ok "读出壳自带 dsh 版本（asar 正文内）" || bad "未读出壳自带版本：$OUT"
+printf '%s' "$OUT" | grep -q "版本偏差" && ok "报出版本偏差（9.9.9 ≠ 0.1.2-rc.1）" || bad "未报版本偏差"
+printf '%s' "$OUT" | grep -q "@deepseek-ai/dsh-settings: ✅ 可解析" && ok "应用代码从 asar 正文读出并比对（扫到 import）" || bad "未扫到 asar 内应用代码"
+printf '%s' "$OUT" | grep -q "扫描文件 1 个" && ok "扫描文件数正确（仅 lib/app.js）" || bad "扫描文件数不对：$OUT"
+
+echo "== 场景 8) 自包含 + 版本一致 + 缺导出 → 退出 1（同源比对，确属致命）=="
+H="$TMP/s8"; RT="$H/runtime/node_modules"; APP="$TMP/s8/DSH Desktop.app"
+mk_runtime "$RT"
+mkdir -p "$RT/@deepseek-ai/dsh/lib"
+printf '%s' '{"name":"@deepseek-ai/dsh","version":"0.1.2-rc.1","main":"./lib/index.js"}' \
+  > "$RT/@deepseek-ai/dsh/package.json"
+printf '%s\n' 'export const x = 1;' > "$RT/@deepseek-ai/dsh/lib/index.js"
+mk_app_packed "$APP" "2.0.7" "$(packed_files 0.1.2-rc.1 'import { settingsNamespace } from "@deepseek-ai/dsh-settings";')"
+run_check --app "$APP" --dsh-home "$H"
+[ "$RC" = "1" ] && ok "退出码 1（版本一致 → 基准等价 → 缺符号必崩）" || bad "退出码应为 1，实际 $RC"
+printf '%s' "$OUT" | grep -q "致命冲突" && ok "标注为致命冲突" || bad "未标注致命冲突"
+printf '%s' "$OUT" | grep -q "settingsNamespace" && ok "指出缺失符号" || bad "未指出缺失符号"
+
+echo "== 场景 9) 自包含 + 版本不同 + 缺导出 → 仅供参考（退出 0，不误杀）=="
+H="$TMP/s9"; RT="$H/runtime/node_modules"; APP="$TMP/s9/DSH Desktop.app"
+mk_runtime "$RT"
+mkdir -p "$RT/@deepseek-ai/dsh/lib"
+printf '%s' '{"name":"@deepseek-ai/dsh","version":"0.1.2-rc.1","main":"./lib/index.js"}' \
+  > "$RT/@deepseek-ai/dsh/package.json"
+printf '%s\n' 'export const x = 1;' > "$RT/@deepseek-ai/dsh/lib/index.js"
+mk_app_packed "$APP" "2.0.7" "$(packed_files 9.9.9 'import { settingsNamespace } from "@deepseek-ai/dsh-settings";')"
+run_check --app "$APP" --dsh-home "$H"
+[ "$RC" = "0" ] && ok "退出码 0（两端版本不同，差异仅供参考）" || bad "退出码应为 0，实际 $RC"
+printf '%s' "$OUT" | grep -q "仅供参考" && ok "输出标注为参考而非致命" || bad "未标注仅供参考：$OUT"
+printf '%s' "$OUT" | grep -q "settingsNamespace" && ok "仍列出差异项" || bad "未列出差异项"
 
 echo
 echo "Desktop 兼容性检查测试结果： $pass 通过 / $fail 失败"

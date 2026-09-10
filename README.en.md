@@ -20,9 +20,9 @@ Arbitrary dependency lifecycle scripts remain disabled by default. Native addons
 
 ## Why this exists
 
-From a certain version, DSH Desktop became a "shell": the App bundle no longer embeds the full `@deepseek-ai/dsh*`, and instead relies on `~/.dsh/runtime` (shared install) for the upstream Harness. This creates two long-term pain points:
+The DSH Desktop packaging model **changed once**: **≤ 2.0.5 is a "shared install" shell** (the App bundle does not embed the full `@deepseek-ai/dsh*` and relies on `~/.dsh/runtime` for the upstream Harness); **≥ 2.0.7 is "self-contained"** (the whole `node_modules` is packed into `app.asar`, and the shell runs its own dsh copy). Each mode has its own long-term pain point:
 
-1. **Shell upgrades overwrite the runtime** — on launch, `healProfilesModuleFallback()` re-symlinks `~/.dsh/profiles/node_modules/@deepseek-ai/*` based on the App bundle's dependency closure; if a future shell re-bundles dsh, your runtime upgrades and patches are silently overwritten.
+1. **The shell↔runtime relationship is implicit** — ≤ 2.0.5: on launch, `healProfilesModuleFallback()` re-symlinks `~/.dsh/profiles/node_modules/@deepseek-ai/*` based on the App bundle's dependency closure; if a future shell re-bundles dsh, your runtime upgrades and patches are silently overwritten. ≥ 2.0.7: the shell's bundled copy and the CLI runtime are **two independent copies**, and the **version skew** between them is invisible on its own (the shell won't crash, but the two sides may differ in behaviour and in the plugin API surface) — and upgrading the runtime no longer affects the shell.
 2. **pnpm upgrades / plugin installs get blocked** — if you launch `dsh web` from a host terminal such as WorkBuddy / CodeBuddy, the host injects `CODEBUDDY_SAFE_DELETE_*` env vars, causing pnpm's temp-dir cleanup to hit a bulk-delete confirmation (`SAFE_DELETE_BULK_CONFIRM_REQUIRED`) that cannot be answered in a non-interactive context.
 
 This toolkit codifies the **reliable fixes** for the above into reusable scripts.
@@ -37,7 +37,7 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 | Any third-party (very old) LLM adapter plugin | didn't catch up to rc.2 contract | may throw `adapter.<method> is not a function` | rc.2 unified the adapter interface contract; very old plugins didn't catch up | ⚠️ Scan installed adapters' dsh version range with `bin/scan-adapters.mjs`; upgrade the plugin to a version supporting rc.2 |
 | `@deepseek-ai/dsh` itself | `0.1.1-rc.2` (with an old shell) | runtime silently overwritten / patches lost after a shell update | shell re-bundles dsh, heal closure re-points profiles symlinks back to the shell | ✅ Pin runtime as authority with `pin-runtime.sh` |
 | `fs-ext@2.1.1` | `0.1.3-alpha.1` source install | boot fails with `Cannot find module './build/Release/fs_ext.node'` | lifecycle scripts were disabled for supply-chain safety, but the required native addon was not built separately | ✅ Automatically allowlist-builds and load-verifies it with rollback; run `dsm repair-native` for an existing broken install |
-| Desktop shell (`DSH Desktop.app`) | After any runtime upgrade | shell-bundled version drifts from runtime version | shell and runtime are decoupled and must be upgraded separately | ✅ Upgrade the shell alone with `dsh-manage.sh shell` |
+| Desktop shell (`DSH Desktop.app`) | After any runtime upgrade | the packaging model varies by version (≤ 2.0.5 shared symlinks / ≥ 2.0.7 self-contained); a mismatch shows up as a shell startup crash or as a version skew between the two copies | ≤ 2.0.5: the shell shares the runtime via symlinks, so manifest gaps or API drift crash it on launch; ≥ 2.0.7: the shell ships its own dsh copy, so runtime upgrades don't change its behaviour | ✅ Upgrade the shell alone with `dsh-manage.sh shell`; `dsm check` reports per mode (manifest gaps / API conflicts / version skew) |
 
 **How to read the table**:
 
@@ -45,6 +45,10 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 - rc.2 **used to be** a breaking adapter interface change (every LLM adapter had to implement `prepareCall` and other new methods), but the popular plugin `@liustack/modlens` has fixed it natively since **≥ 3.23.x**; for any other old plugin, `bin/scan-adapters.mjs` surfaces the compatibility risk ahead of time.
 
 ## Architecture
+
+The DSH Desktop packaging model **changed once** (≤ 2.0.5 "shared symlinks" → ≥ 2.0.7 "self-contained"); this toolkit handles each mode differently.
+
+**Mode A: shared symlinks (Desktop ≤ 2.0.5)**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -67,6 +71,29 @@ Check this before upgrading DSH: which plugin breaks on which DSH version. ⚠�
 
 `pin-runtime.sh` symlinks the shell's and profiles' `@deepseek-ai/*` to the runtime, so heal always lands on the runtime — **runtime stays authoritative, the shell can't overwrite it**.
 
+**Mode B: self-contained (Desktop ≥ 2.0.7)**
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  DSH Desktop.app (shell)                                      │
+│   ships its own node_modules/@deepseek-ai/* inside app.asar   │
+│   (~167 MB of body; measured 2.0.7 → dsh 0.1.5-rc.1)          │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ~/.dsh/runtime (CLI / web side)   ◄── still pinned by dsm    │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ~/.dsh/profiles/node_modules/@deepseek-ai/*  ──symlink─► runtime│
+│   (resolved here when web / CLI starts)                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+The shell **no longer** shares the runtime through symlinks, therefore:
+
+- `pin-runtime.sh` **skips the app bundle** — packed entries win over symlinks, so rewriting them is a no-op, and editing `.app` resources breaks the code signature and the updater. It only pins `profiles`.
+- The concern shifts from "manifest gaps" to a **version skew**: the dsh version bundled in the shell vs the CLI runtime. `dsm check` reports both and warns on a mismatch, with alignment advice (upgrade the shell, or move the runtime back to the shell's baseline).
+- Shell and CLI are two independent copies: upgrading the CLI runtime does not change the shell's behaviour, and rolling the runtime back cannot "fix" the shell — a skew is only resolved by upgrading the shell.
+
 ## File layout
 
 ```
@@ -75,14 +102,15 @@ dsh-setup-manager/
 ├── LICENSE                    # MIT
 ├── .gitignore
 ├── bin/
-│   ├── pin-runtime.sh         # Pin runtime as authority (shell/profile symlinks → runtime)
 │   ├── dsh-manage.sh          # Unified: runtime/shell upgrade · web · status · doctor · rollback · scan · check
+│   ├── pin-runtime.sh         # Pin runtime as authority (rewrites shell/profile symlinks → runtime in shared mode)
+│   ├── app-mode.sh            # Detect the shell packaging mode (shared symlinks / packed self-contained); shared by the two above
+│   ├── check-desktop.mjs      # Static pre-check of shell↔runtime compatibility (asar manifest diff + app-code API imports + version skew)
 │   ├── verify-heal.mjs        # Verify key packages still resolve to runtime after heal
 │   ├── check-native-addons.mjs # Check/allowlist-repair native addons required at boot
 │   ├── scan-adapters.mjs      # Scan installed LLM adapters vs runtime dsh version compatibility
 │   └── scan-plugin-api.mjs    # Statically diff plugins' runtime API imports to pre-check startup-breaking conflicts
-│   └── check-desktop.mjs      # Statically pre-check Desktop↔shared-runtime compatibility (asar manifest diff + app-code API imports)
-└── docs/
+└── tests/                     # Regression tests (bash-driven, with mock DSH trees and asar fixtures)
 ```
 
 ## Install

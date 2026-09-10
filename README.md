@@ -20,9 +20,9 @@ Runtime 安装默认禁止任意依赖执行 lifecycle script，仅在严格的�
 
 ## 为什么需要它
 
-DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内嵌完整的 `@deepseek-ai/dsh*`，而是依赖 `~/.dsh/runtime`（共享安装）来提供上游 Harness。这带来两个长期痛点：
+DSH Desktop 的打包形态**换过一次**：**≤ 2.0.5 是「共享安装」的壳**（App 包不内嵌完整的 `@deepseek-ai/dsh*`，依赖 `~/.dsh/runtime` 提供上游 Harness）；**≥ 2.0.7 改为「自包含」**（整棵 `node_modules` 打进 `app.asar`，壳跑自己的 dsh 副本）。两种形态各有长期痛点：
 
-1. **壳更新会覆盖 runtime** —— 桌面启动时 `healProfilesModuleFallback()` 会按 App 包的依赖闭包把 `~/.dsh/profiles/node_modules/@deepseek-ai/*` 重新软链接；一旦壳把 dsh 又塞进 App 包，你的 runtime 升级与补丁就被静默覆盖。
+1. **壳与 runtime 的关系是隐式的** —— ≤2.0.5：桌面启动时 `healProfilesModuleFallback()` 会按 App 包的依赖闭包把 `~/.dsh/profiles/node_modules/@deepseek-ai/*` 重新软链接，一旦壳把 dsh 又塞回 App 包，你的 runtime 升级与补丁就被静默覆盖；≥2.0.7：壳自带副本与 CLI runtime 是**两份独立副本**，两者的**版本偏差**不会自己暴露（壳不会崩，但两端行为与插件 API 面可能不同），而且升级 runtime 不再影响壳。
 2. **pnpm 升级/装插件被拦截** —— 如果你在 WorkBuddy / CodeBuddy 之类宿主的终端里启动 `dsh web`，宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 环境变量会让 pnpm 清理临时目录时触发批量删除确认（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），非交互环境直接失败。
 
 本工具包把上述问题的**可靠解法**固化成可复用脚本。
@@ -37,7 +37,7 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 | 任意第三方（极老旧）LLM adapter 插件 | 未跟进 rc.2 接口契约 | 可能报 `adapter.<method> is not a function` | rc.2 统一了 adapter 接口契约，极老旧插件未跟进 | ⚠️ 用 `bin/scan-adapters.mjs` 扫描已装 adapter 的 dsh 版本范围；缺方法就升级该插件到支持 rc.2 的版本 |
 | `@deepseek-ai/dsh` 本体 | `0.1.1-rc.2`（配合旧壳） | 壳更新后 runtime 被静默覆盖、补丁丢失 | 壳内重新捆绑 dsh，heal 闭包把 profiles 软链指回壳 | ✅ 用 `pin-runtime.sh` 钉死 runtime 权威 |
 | `fs-ext@2.1.1` | `0.1.3-alpha.1` 源码安装 | 启动时报 `Cannot find module './build/Release/fs_ext.node'` | 安装器为供应链安全禁用了 lifecycle script，却未单独构建必需 native addon | ✅ 自动白名单构建、加载验证与失败回滚；既有异常安装可运行 `dsm repair-native` |
-| 桌面壳（`DSH Desktop.app`） | 任意 runtime 升级后 | 壳自带版本与 runtime 版本错位 | 壳与 runtime 解耦后需分别升级 | ✅ 用 `dsh-manage.sh shell` 单独升级壳 |
+| 桌面壳（`DSH Desktop.app`） | 任意 runtime 升级后 | 打包形态随版本变化（≤2.0.5 共享软链 / ≥2.0.7 自包含），错位表现为壳启动崩溃或两端版本偏差 | ≤2.0.5 壳经软链共用 runtime，清单缺口 / API 代差都会让壳启动即崩；≥2.0.7 壳自带 dsh 副本，升级 runtime 不改变壳行为 | ✅ `dsh-manage.sh shell` 单独升级壳；`dsm check` 按模式报告（清单缺口 / API 冲突 / 版本偏差） |
 
 **读表要点**：
 
@@ -45,6 +45,10 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 - rc.2 曾是一次**破坏性 adapter 接口变更**（每个 LLM adapter 须实现 `prepareCall` 等新方法），但主流插件 `@liustack/modlens` 已在 **≥ 3.23.x** 原生修复；其余老旧插件用 `bin/scan-adapters.mjs` 扫描即可提前发现兼容风险。
 
 ## 架构
+
+DSH Desktop 的打包形态**换过一次**（≤ 2.0.5「共享软链」→ ≥ 2.0.7「自包含」），本工具包按模式区别处理。
+
+**模式 A：共享软链（Desktop ≤ 2.0.5）**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -67,6 +71,29 @@ DSH Desktop 从某个版本起变成了一个「壳」：App 包本身不再内�
 
 `pin-runtime.sh` 把 App 包 / profiles 的 `@deepseek-ai/*` 都软链接到 runtime，使 heal 的解析永远落到 runtime —— **runtime 始终权威，壳更新盖不到**。
 
+**模式 B：自包含（Desktop ≥ 2.0.7）**
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  DSH Desktop.app（壳）                                         │
+│   app.asar 正文内自带 node_modules/@deepseek-ai/*（约 167 MB） │
+│   → 壳跑自己的 dsh 副本（2.0.7 实测 = 0.1.5-rc.1）             │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ~/.dsh/runtime（CLI / Web 侧）      ◄── 仍由 pin-runtime 钉死  │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  ~/.dsh/profiles/node_modules/@deepseek-ai/*  ──软链──► runtime │
+│   （Web / CLI 启动时解析到这里）                               │
+└──────────────────────────────────────────────────────────────┘
+```
+
+壳**不再**经软链共享 runtime，于是：
+
+- `pin-runtime.sh` **跳过改造 .app** —— 打包条目优先，改软链无效；而且改 `.app` 资源会破坏代码签名与更新校验。它只钉 profiles。
+- 关注点从「清单缺口」变成**版本偏差**：壳自带 dsh 版本 vs CLI runtime 版本。`dsm check` 会同时报出两者，不一致时给出告警与对齐建议（升级壳，或把 runtime 退到壳的基线版本）。
+- 壳与 CLI 是两份独立副本：升级 CLI runtime 不会改变壳的行为，回退 runtime 也无法「修好」壳——版本偏差只能靠升级壳解决。
+
 ## 文件结构
 
 ```
@@ -75,14 +102,15 @@ dsh-setup-manager/
 ├── LICENSE                    # MIT
 ├── .gitignore
 ├── bin/
-│   ├── pin-runtime.sh         # 钉死 runtime 权威（壳/Profile 软链 → runtime）
 │   ├── dsh-manage.sh          # 统一管理：runtime/壳升级 · web · status · doctor · rollback · scan · check
+│   ├── pin-runtime.sh         # 钉死 runtime 权威（共享软链模式下改写壳/Profile 软链 → runtime）
+│   ├── app-mode.sh            # 判定壳的打包模式（shared 共享软链 / packed 自包含），被上面两个脚本共用
+│   ├── check-desktop.mjs      # 静态预检壳与 runtime 的兼容性（asar 清单差集 + 应用代码 API 导入 + 版本偏差）
 │   ├── verify-heal.mjs        # 校验 heal 后关键包是否仍解析到 runtime
 │   ├── check-native-addons.mjs # 检查/白名单修复启动必需的 native addon
 │   ├── scan-adapters.mjs      # 扫描已装 LLM adapter 与 runtime dsh 版本的兼容性
 │   └── scan-plugin-api.mjs    # 静态比对插件对 runtime 的 API 导入，预检启动会崩的冲突
-│   └── check-desktop.mjs      # 静态预检 Desktop 与共享 runtime 的兼容性（asar 清单差集 + 应用代码 API 导入）
-└── docs/
+└── tests/                     # 回归测试（bash 驱动，含 mock DSH 树与 asar 夹具）
 ```
 
 ## 安装

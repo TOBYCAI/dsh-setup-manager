@@ -20,10 +20,18 @@ function getArg(flag) {
 }
 
 const home = getArg('--dsh-home') || process.env.DSH_HOME || join(process.env.HOME, '.dsh');
+// 锚点：优先壳内 app.asar.unpacked/package.json（共享软链模式 ≤2.0.5 有）；
+// 自包含壳（≥2.0.7）把 node_modules 打进 asar、unpacked 下没有 package.json，
+// 此时退回 runtime 的 dsh/package.json —— 语义正好是我们想验证的
+// 「profiles 的 @deepseek-ai/* 应解析到 runtime」，对 CLI/web 侧依然有效。
 const appPkg = getArg('--app-pkg') ||
   (existsSync('/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/package.json')
     ? '/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/package.json'
     : null);
+if (!appPkg && !getArg('--app-pkg')) {
+  console.log('ℹ️  壳内无 app.asar.unpacked/package.json（自包含壳或未安装壳）：'
+    + '改用 runtime 的 dsh/package.json 作锚点，验证 profiles 是否解析到 runtime。');
+}
 
 const runtimeBoot = join(home, 'runtime/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js');
 if (!existsSync(runtimeBoot)) {

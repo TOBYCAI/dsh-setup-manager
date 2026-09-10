@@ -42,7 +42,20 @@ set -eo pipefail
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 DSH_APP="${DSH_APP:-/Applications/DSH Desktop.app}"
 DSH_PATCH_YML="${DSH_PATCH_YML:-$DSH_HOME/patches/enable-skills.yml}"
-BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+# BIN_DIR：用 BASH_SOURCE 而非 $0 —— 本文件会被测试 source（tests/runtime-transaction.sh），
+# 那种场景下 $0 是测试脚本路径，会把 BIN_DIR 算成测试目录（既有隐患，2026-09-10 修）。
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# 壳打包模式判定（shared/packed）与默认 @deepseek-ai 位置：与 pin-runtime.sh 共用一份实现，
+# 避免两处各写一套阈值判断（Desktop 2.0.7 起壳改为自包含打包，判断必须一致）。
+# shellcheck source=bin/app-mode.sh
+if [ -f "$BIN_DIR/app-mode.sh" ]; then
+  . "$BIN_DIR/app-mode.sh"
+fi
+# 兜底：辅助脚本缺失时按「未知/默认路径」降级，绝不阻断工具本身
+command -v dsh_app_mode >/dev/null 2>&1 || dsh_app_mode() { printf 'unknown'; }
+command -v dsh_app_mode_why >/dev/null 2>&1 || dsh_app_mode_why() { printf '未加载 app-mode.sh'; }
+command -v dsh_default_app_pkg >/dev/null 2>&1 \
+  || dsh_default_app_pkg() { printf '%s' "${DSH_APP_PKG:-/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/node_modules/@deepseek-ai}"; }
 
 # ---- 平台探测 ----
 _dsh_os() {
@@ -172,7 +185,12 @@ _dsh_recover_orphan_tx() {
 }
 
 # ---- 一次拉取 next/latest 两个 dist-tag ----
+# 同一次运行内只查一次：doctor / check / status / web 启动路径都会调用本函数，
+# 而 `npm view` 在慢网络下实测单次 1–20s（本机走代理时 21s）——重复查询纯属浪费。
+# 用 _DSH_UPD_CACHED 去重（单次 CLI 调用内数据不会变，缓存无副作用）。
 _dsh_check_update() {
+  if [ "${_DSH_UPD_CACHED:-0}" = "1" ]; then return 0; fi
+  _DSH_UPD_CACHED=1
   local tags next latest inst
   tags="$(npm view @deepseek-ai/dsh dist-tags --json 2>/dev/null || true)"
   if [ -n "$tags" ]; then
@@ -295,6 +313,10 @@ _dsh_do_upgrade() {
   local rc=$?
   if [ $rc -ne 0 ]; then echo "✗ 升级失败（退出 ${rc}）。"; _dsh_tx_rollback "$base"; return 1; fi
   if ! _dsh_native_repair "$base"; then echo "✗ native addon 构建/加载验证失败。"; _dsh_tx_rollback "$base"; return 1; fi
+  # 版本校验前必须先重钉壳链接：源码安装（runtime-src 视图）期间 profiles/@deepseek-ai/*
+  # 指向 runtime-src/<ver>/apps/cli，npm 包虽已装好，但 shim 链还解析到旧源码版本，
+  # 会让 `dsh --version` 读到旧号而误判升级失败（2026-09-10 源码→npm 切换实测踩坑）。
+  zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
   local got; got="$(dsh --version 2>/dev/null | head -n1)"
   if [ "$got" != "$wanted" ]; then
     echo "⚠ 升级后版本=${got}（期望 ${wanted}）。可重跑 dsh-manage.sh pin 重新钉死。"
@@ -304,8 +326,11 @@ _dsh_do_upgrade() {
   _dsh_tx_commit
   echo "✓ 完成 → ${got}（重新钉死壳链接…）"
   zsh "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || bash "$BIN_DIR/pin-runtime.sh" >/dev/null 2>&1 || true
-  # 升级后立即报告 Desktop 兼容性：Desktop 与 CLI 共享 runtime，新 runtime 可能
-  # 与已装 Desktop 的 asar 清单 / 应用代码不兼容（两层故障都会让 Desktop 启动即崩）。
+  # 升级后立即报告 Desktop 兼容性。壳有两种打包模式（见 bin/app-mode.sh）：
+  #   shared（≤2.0.5）壳经软链共用 CLI runtime → 新 runtime 可能让壳 asar 清单缺包、
+  #                   或壳应用代码 import 的符号被移除（两者都会让壳启动即崩）；
+  #   packed（≥2.0.7）壳自带 dsh 副本 → 关注点是「壳自带版本 vs CLI runtime 版本」的偏差。
+  # check-desktop.mjs 会按模式给出对应结论（版本一致性 / 清单缺口 / API 冲突）。
   if [ -d "${DSH_DESKTOP_APP:-/Applications/DSH Desktop.app}" ]; then
     echo ""
     _dsh_desktop_check || true
@@ -386,7 +411,7 @@ _dsh_do_upgrade_src() {
       https://github.com/deepseek-ai/deepseek-harness.git "$src_dir" 2>&1 | tail -2 \
       || { echo "✗ 源码下载失败（tag dsh-v${wanted} 可能不存在或网络不通）"; return 1; }
     ( cd "$src_dir" && git sparse-checkout set --skip-checks \
-        apps packages vendor native patches website \
+        apps packages vendor native patches website scripts snapshots \
         pnpm-workspace.yaml package.json pnpm-lock.yaml scripts .npmrc 2>/dev/null || true )
   else
     echo "→ 复用已下载源码 ${src_dir}"
@@ -476,8 +501,13 @@ _dsh_src_restore() {
         if (j.dependencies && j.dependencies["@deepseek-ai/dsh"] === "workspace:^") j.dependencies["@deepseek-ai/dsh"] = v
         fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
       ' "$DSH_HOME/runtime/package.json" "$1" 2>/dev/null || return 1
-      rm -f "$DSH_HOME/runtime/pnpm-workspace.yaml"
       echo "→ 源码回滚备份已缺失，已将 package.json 的 workspace:^ 改为 npm 版本 $1（并移除 workspace 挂载）"
+    fi
+    # 无论 package.json 是否 workspace:^，只要存在源码挂载文件就必须移除：留着会让
+    # pnpm 把同名 workspace 包（runtime-src 里的旧版）链接进来，npm 版装了也不生效。
+    if [ -f "$DSH_HOME/runtime/pnpm-workspace.yaml" ]; then
+      rm -f "$DSH_HOME/runtime/pnpm-workspace.yaml"
+      echo "→ 已移除残留的 workspace 挂载文件（pnpm-workspace.yaml）"
     fi
   fi
 }
@@ -498,6 +528,10 @@ _dsh_shell_asset_regex() {
   esac
 }
 _dsh_shell_check() {
+  # 与 _dsh_check_update 同理：同一次运行内只拉一次 GitHub releases/latest
+  # （doctor/check 都会调用；壳的最新版本号在一次 CLI 调用内不会变）
+  if [ "${_DSH_SHELL_CACHED:-0}" = "1" ]; then return 0; fi
+  _DSH_SHELL_CACHED=1
   _DSH_SHELL_CUR="$(_dsh_shell_cur)"
   local rel rx
   rel="$(curl -sL --max-time 25 "https://api.github.com/repos/anywhere-labs/deepseek-harness-desktop/releases/latest" 2>/dev/null)"
@@ -739,10 +773,18 @@ _dsh_rollback() {
       echo "将撤销 runtime pin：把 $bak 的真实目录还原到壳内 @deepseek-ai（profiles 仍指向 runtime，"
       echo "下次壳升级 / heal 会重新以壳自带版本解析）。备份内容："; ls "$bak"
       _dsh_confirm "确认回滚 runtime pin? [y/N] " || { echo "已取消。"; return 1; }
-      local appdir
-      if [ -n "${DSH_APP_PKG:-}" ]; then appdir="$DSH_APP_PKG";
-      elif [ -d "/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/node_modules/@deepseek-ai" ]; then appdir="/Applications/DSH Desktop.app/Contents/Resources/app.asar.unpacked/node_modules/@deepseek-ai";
-      else echo "✗ 无法确定壳内 @deepseek-ai 目录（请设置 DSH_APP_PKG）"; return 1; fi
+      local appdir mode
+      appdir="$(dsh_default_app_pkg)"
+      mode="$(dsh_app_mode "$appdir")"
+      if [ "$mode" = "packed" ]; then
+        echo "✗ 当前壳为「自包含」打包（$(dsh_app_mode_why "$appdir")）："
+        echo "  壳的 @deepseek-ai 由 asar 内的自带副本提供，不存在需要还原的软链；"
+        echo "  把备份写回 .app 会破坏代码签名与更新校验。已跳过（profiles 无需回滚，仍指向 runtime）。"
+        return 1
+      fi
+      if [ -z "${DSH_APP_PKG:-}" ] && [ ! -d "$appdir" ]; then
+        echo "✗ 无法确定壳内 @deepseek-ai 目录（请设置 DSH_APP_PKG）"; return 1
+      fi
       for n in "$bak"/*; do
         [ -e "$n" ] || continue; name="$(basename "$n")"; tgt="$appdir/$name"
         [ -L "$tgt" ] && rm -f "$tgt"
