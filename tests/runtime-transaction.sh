@@ -32,4 +32,20 @@ printf 'before-kill\n' > "$DSH_HOME/runtime/node_modules/state"
 ( _dsh_tx_begin "$DSH_HOME/runtime"; trap - EXIT INT TERM HUP; mkdir -p "$DSH_HOME/runtime/node_modules"; printf 'partial\n' > "$DSH_HOME/runtime/node_modules/state"; exit 137 ) >/dev/null 2>&1 || true
 _dsh_recover_orphan_tx >/dev/null
 grep -q before-kill "$DSH_HOME/runtime/node_modules/state"
-echo "runtime transaction: rollback / commit / interrupted-exit / orphan recovery 全部通过"
+
+# 残留事务 + 当前 runtime 仍健康 ⇒ 绝不自动回滚（2026-09-11 实测：rc.2 升级
+# 成功后其结果被下一条 dsm 命令的孤儿事务恢复降级回 rc.1）。场景对齐「已提交
+# 但清理失败」：事务目录里是旧 node_modules，runtime 里已有完整的新版本。
+( _dsh_tx_begin "$DSH_HOME/runtime"; trap - EXIT INT TERM HUP; mkdir -p "$DSH_HOME/runtime/node_modules"; printf 'stale-tx\n' > "$DSH_HOME/runtime/node_modules/state"; exit 137 ) >/dev/null 2>&1 || true
+# 崩溃后新版本已装好（pnpm install 完成、commit 的 rm -rf 失败留下的现场）
+mkdir -p "$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh"
+printf '{"name":"dsh","version":"0.2.0"}\n' > "$DSH_HOME/runtime/node_modules/@deepseek-ai/dsh/package.json"
+printf '{"name":"runtime","dependencies":{"@deepseek-ai/dsh":"0.2.0"}}\n' > "$DSH_HOME/runtime/package.json"
+printf 'healthy-new\n' > "$DSH_HOME/runtime/node_modules/state"
+out="$(_dsh_recover_orphan_tx)"
+printf '%s\n' "$out" | grep -q "不自动回滚"
+grep -q healthy-new "$DSH_HOME/runtime/node_modules/state"
+# 恢复决策必须保留事务目录（等用户自行决定 rollback 或清理）
+find "$DSH_HOME" -maxdepth 1 -type d -name '.dsm-runtime-tx.*' | grep -q . && rm -rf "$DSH_HOME"/.dsm-runtime-tx.*
+
+echo "runtime transaction: rollback / commit / interrupted-exit / orphan recovery / healthy-no-rollback 全部通过"

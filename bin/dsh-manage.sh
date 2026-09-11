@@ -172,6 +172,18 @@ _dsh_tx_commit() {
   return 0
 }
 
+# 当前 runtime 是否健康：package.json 可解析且带 @deepseek-ai/dsh 依赖声明，
+# 且 dsh 包的 manifest 真实存在。健康 ⇒ 残留事务多来自「已提交但清理失败」或
+# 「新版本已装好但没走到 commit」，此时自动回滚会把健康的升级结果降级回旧版
+# （2026-09-11 实测踩坑：rc.2 升级成功后被孤儿事务恢复降回 rc.1）。
+_dsh_runtime_healthy() {
+  local base="$1"
+  [ -f "$base/package.json" ] || return 1
+  node -e 'try{const j=require(process.argv[1]);if(!j.dependencies||!j.dependencies["@deepseek-ai/dsh"])process.exit(1)}catch(e){process.exit(1)}' "$base/package.json" 2>/dev/null || return 1
+  [ -e "$base/node_modules/@deepseek-ai/dsh/package.json" ] || return 1
+  return 0
+}
+
 _dsh_recover_orphan_tx() {
   local tx base
   tx="$(find "$DSH_HOME" -maxdepth 1 -type d -name '.dsm-runtime-tx.*' 2>/dev/null | sort | tail -1 || true)"
@@ -179,6 +191,12 @@ _dsh_recover_orphan_tx() {
   base="$DSH_HOME/runtime"
   [ ! -f "$tx/runtime-base" ] || base="$(head -n1 "$tx/runtime-base")"
   case "$base" in "$DSH_HOME"/runtime) ;; *) echo "✗ 拒绝恢复目标异常的事务：$tx" >&2; return 1 ;; esac
+  if _dsh_runtime_healthy "$base"; then
+    echo "⚠ 发现残留安装事务：$tx"
+    echo "  当前 runtime 仍健康，不自动回滚（回滚只会把健康的升级结果降级）。"
+    echo "  如确认要恢复到事务前的版本：dsm rollback runtime；单纯清理残留：rm -rf \"$tx\""
+    return 0
+  fi
   echo "⚠ 检测到上次被强制中断的安装事务，自动恢复旧 Runtime：$tx"
   _DSM_TX_DIR="$tx"; _DSM_TX_BASE="$base"
   _dsh_tx_rollback "$base"
