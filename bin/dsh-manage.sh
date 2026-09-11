@@ -280,6 +280,25 @@ _dsh_space_estimate_shell() {
 }
 
 # ---- 就地升级共享 runtime 到 $1 ----
+# 把目标版本写进 runtime 的 package.json。pnpm install 只解析 package.json 的
+# 依赖声明——runtime 已精确 pin 旧版本时（npm 渠道常态），install 重装的仍是
+# 旧版，版本核对必然失败回滚（2026-09-11 实测：rc.1→rc.2 升级恒失败，装出来
+# 全是 rc.1）。必须在事务内调用，失败回滚会还原 package.json。
+_dsh_pin_runtime_version() {
+  local base="$1" wanted="$2"
+  [ -f "$base/package.json" ] || { echo "✗ $base/package.json 不存在，无法固定版本。" >&2; return 1; }
+  if grep -q "\"@deepseek-ai/dsh\"[[:space:]]*:[[:space:]]*\"${wanted}\"" "$base/package.json"; then return 0; fi
+  node -e '
+    const fs = require("fs")
+    const p = process.argv[1], v = process.argv[2]
+    const j = JSON.parse(fs.readFileSync(p, "utf8"))
+    j.dependencies = j.dependencies || {}
+    j.dependencies["@deepseek-ai/dsh"] = v
+    fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
+  ' "$base/package.json" "$wanted" || { echo "✗ 无法将 @deepseek-ai/dsh 固定为 ${wanted}。" >&2; return 1; }
+  echo "→ 已将 package.json 的 @deepseek-ai/dsh 固定为 $wanted"
+}
+
 _dsh_do_upgrade() {
   local wanted="$1" base pnpm
   [ -z "$wanted" ] && { echo "✗ 未指定版本" >&2; return 1; }
@@ -299,6 +318,9 @@ _dsh_do_upgrade() {
   _dsh_tx_begin "$base" || return 1
   # 若当前是源码安装（runtime-src/backup 存在），先恢复原始 package.json 再装 npm 版
   if ! _dsh_src_restore "$wanted"; then _dsh_tx_rollback "$base"; return 1; fi
+  # npm 渠道就地升级：把目标版本写进 package.json（事务内），否则 install 只会
+  # 重装旧版本（见 _dsh_pin_runtime_version 注释）。
+  if ! _dsh_pin_runtime_version "$base" "$wanted"; then _dsh_tx_rollback "$base"; return 1; fi
   pnpm="$(_dsh_pnpm)"
   echo "→ 升级共享安装 $base → @deepseek-ai/dsh@$wanted"
   # 用「删 node_modules + lockfile 后联网重解析」确保整棵依赖树干净一致，
