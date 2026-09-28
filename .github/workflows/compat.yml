@@ -21,6 +21,10 @@ jobs:
         run: bash tests/native-addons.sh
       - name: Runtime transaction tests
         run: bash tests/runtime-transaction.sh
+      - name: Update channel pick tests
+        run: bash tests/update-pick.sh
+      - name: Shell channel pick tests
+        run: bash tests/shell-pick.sh
       - name: Integration tests
         run: bash tests/integration.sh
       - name: Desktop compatibility tests

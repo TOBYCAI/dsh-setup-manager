@@ -17,6 +17,10 @@
 #     软链到 ~/.dsh/runtime/node_modules/@deepseek-ai/*，让 heal 的 BFS 解析顺着链接落到
 #     runtime，profile 链接自然被 heal 指向 runtime。
 #
+#     【机制现状】dsh 0.1.7-alpha.1 起 dsh-app-boot 已**删除** healProfilesModuleFallback，
+#     壳不再在启动时改写 profiles 软链：pin 的结果长期有效，不再有「被壳打回」的风险。
+#     本脚本保留模式 A 的处理仅用于旧版 runtime/壳；verify-heal.mjs 会自动降级为静态校验。
+#
 #   模式 B「自包含」（Desktop ≥ 2.0.7）
 #     壳把整棵 node_modules 打进 app.asar 正文（实测 245 个 @deepseek-ai 包、
 #     正文 ~167 MB），unpacked 只剩 node-addon-system-* 两个真实目录，**没有软链农场**。

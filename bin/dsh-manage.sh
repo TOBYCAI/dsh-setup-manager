@@ -229,6 +229,84 @@ _dsh_check_update() {
   _DSH_NEXT="$next"; _DSH_LATEST="$latest"; _DSH_INST="$inst"
 }
 
+# ---- 升级候选（渠道 + 版本）：只保留「严格新于当前」的版本 ----
+# next 与 latest 是**两个渠道**（dist-tag），不是「连续两跳」。旧实现把两者当候选
+# 依次 y/N 确认，升到 next（如 0.1.7-rc.2）后还会追问 latest（如 0.1.5-rc.3）——
+# 那是降级，而且用户无法表达「我只要 next」。故拆出候选计算，供单次单选使用。
+# 输出：每行 "<渠道>\t<版本>"；两渠道同版本时合并为 "next/latest" 一行。
+_dsh_update_candidates() {
+  local inst="${_DSH_INST:-}" nv="" lv=""
+  if [ -n "${_DSH_NEXT:-}" ] && _dsh_ver_gt "$_DSH_NEXT" "$inst"; then nv="$_DSH_NEXT"; fi
+  if [ -n "${_DSH_LATEST:-}" ] && _dsh_ver_gt "$_DSH_LATEST" "$inst"; then lv="$_DSH_LATEST"; fi
+  if [ -n "$nv" ] && [ "$nv" = "$lv" ]; then printf 'next/latest\t%s\n' "$nv"; return 0; fi
+  [ -n "$nv" ] && printf 'next\t%s\n' "$nv"
+  [ -n "$lv" ] && printf 'latest\t%s\n' "$lv"
+  return 0
+}
+
+# 渠道说明（选择菜单用）
+_dsh_channel_desc() {
+  case "$1" in
+    next) echo "预发布渠道" ;;
+    latest) echo "默认渠道" ;;
+    *) echo "两个渠道同版本" ;;
+  esac
+}
+
+# 解析选择结果（纯函数，便于测试）：$1=候选行（\t 分隔） $2=用户输入
+# 命中时把所选版本打到 stdout 并返回 0；跳过 / 无效输入返回 1。
+_dsh_update_pick_apply() {
+  local rows="$1" sel="$2" i=0 label ver picked=""
+  sel="$(printf '%s' "$sel" | tr -d '[:space:]')"
+  [ -z "$sel" ] && return 1
+  [ "$sel" = "0" ] && return 1
+  case "$sel" in *[!0-9]*) return 1 ;; esac
+  while IFS=$'\t' read -r label ver; do
+    [ -n "$ver" ] || continue
+    i=$((i+1))
+    [ "$i" -eq "$sel" ] && picked="$ver"
+  done <<< "$rows"
+  [ -n "$picked" ] || return 1
+  printf '%s' "$picked"
+  return 0
+}
+
+# ---- 交互式选择升级目标（一次单选；结果写入 _DSH_PICK）----
+# 返回 0=已选中；1=无候选 / 非交互 / 用户跳过。升级动作由调用方执行，避免重复实现。
+_dsh_update_pick() {
+  local rows i=0 label ver sel inst list=""
+  rows="$(_dsh_update_candidates)"
+  [ -n "$rows" ] || return 1
+  inst="${_DSH_INST:-未知}"
+  if [ ! -t 0 ]; then
+    while IFS=$'\t' read -r label ver; do
+      [ -n "$ver" ] || continue
+      list="${list}${list:+, }${ver}（${label}）"
+    done <<< "$rows"
+    echo "ℹ 检测到 runtime 更新可用（${inst} → ${list}），非交互环境未自动升级。"
+    return 1
+  fi
+  echo "=== DSH runtime 升级 ==="
+  echo "当前版本：${inst}"
+  while IFS=$'\t' read -r label ver; do
+    [ -n "$ver" ] || continue
+    i=$((i+1))
+    printf '  [%d] %-12s %-11s %s\n' "$i" "$label" "$ver" "$(_dsh_channel_desc "$label")"
+  done <<< "$rows"
+  echo "  [0] 跳过（保持当前版本）"
+  printf '选择要升级到的渠道 [0-%d]（回车=0）: ' "$i"
+  IFS= read -r sel || return 1
+  sel="$(printf '%s' "$sel" | tr -d '[:space:]')"
+  [ -z "$sel" ] && sel=0
+  case "$sel" in *[!0-9]*) echo "⚠ 输入非数字，已跳过升级。"; return 1 ;; esac
+  if [ "$sel" -eq 0 ]; then echo "已跳过升级。"; return 1; fi
+  if [ "$sel" -gt "$i" ]; then echo "⚠ 编号越界（0-${i}），已跳过升级。"; return 1; fi
+  ver="$(_dsh_update_pick_apply "$rows" "$sel")"
+  [ -n "$ver" ] || { echo "⚠ 未能定位编号 ${sel}，已跳过升级。"; return 1; }
+  _DSH_PICK="$ver"
+  return 0
+}
+
 # ==== 安装 / 升级前的磁盘空间预估 ====
 # 用户诉求：无论 npm 还是源码渠道，动手前先告知本次升级会占用多少空间。
 # 估算口径刻意保守而快速（npm install --dry-run 在代理网络下会卡死全树解析，
@@ -568,18 +646,138 @@ _dsh_shell_asset_regex() {
   esac
 }
 _dsh_shell_check() {
-  # 与 _dsh_check_update 同理：同一次运行内只拉一次 GitHub releases/latest
-  # （doctor/check 都会调用；壳的最新版本号在一次 CLI 调用内不会变）
+  # ⚠️ 不能用 releases/latest：上游把 vX.Y.Z-next 也标成「正式发布」（prerelease=false），
+  # 该端点会直接返回 next 版（2026-09-28 实测 latest = v2.0.15-next，稳定版其实是 v2.0.15）。
+  # 改为拉 release 列表，按 tag 后缀显式分渠道：无后缀 = latest，-next = next；
+  # beta/alpha 不提供渠道（上游已正确标记 prerelease）。
+  # 与 _dsh_check_update 同理：同一次运行内只拉一次（doctor/check/status 都会调用）。
   if [ "${_DSH_SHELL_CACHED:-0}" = "1" ]; then return 0; fi
   _DSH_SHELL_CACHED=1
   _DSH_SHELL_CUR="$(_dsh_shell_cur)"
-  local rel rx
-  rel="$(curl -sL --max-time 25 "https://api.github.com/repos/anywhere-labs/deepseek-harness-desktop/releases/latest" 2>/dev/null)"
+  _DSH_SHELL_LATEST=""; _DSH_SHELL_URL=""; _DSH_SHELL_NEXT=""; _DSH_SHELL_NEXT_URL=""
+  local rel rx rows ch v u
+  rel="$(curl -sL --max-time 25 "https://api.github.com/repos/anywhere-labs/deepseek-harness-desktop/releases?per_page=40" 2>/dev/null)"
   if [ -n "$rel" ]; then
     rx="$(_dsh_shell_asset_regex)"
-    _DSH_SHELL_LATEST="$(printf '%s' "$rel" | DSH_ASSET_RX="$rx" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v="";try{v=(JSON.parse(s).tag_name||"").replace(/^v/,"")}catch(e){}console.log(v)})' 2>/dev/null)"
-    _DSH_SHELL_URL="$(printf '%s' "$rel" | DSH_ASSET_RX="$rx" node -e 'const rx=new RegExp(process.env.DSH_ASSET_RX,"i");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const a=(j.assets||[]).find(x=>rx.test(x.name));console.log(a?a.browser_download_url:(j.html_url||""))}catch(e){console.log("")}})' 2>/dev/null)"
+    rows="$(printf '%s' "$rel" | DSH_ASSET_RX="$rx" node -e '
+      let s="";
+      process.stdin.on("data",d=>s+=d).on("end",()=>{
+        const rx = new RegExp(process.env.DSH_ASSET_RX || "$^", "i");
+        let list; try { list = JSON.parse(s); } catch (e) { return; }
+        if (!Array.isArray(list)) return;
+        const parse = (t) => {
+          const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(t);
+          if (!m) return null;
+          return { num: [+m[1], +m[2], +m[3]], pre: m[4] || "", raw: t.replace(/^v/, "") };
+        };
+        const newer = (a, b) => {
+          if (!b) return true;
+          for (let i = 0; i < 3; i++) if (a.num[i] !== b.num[i]) return a.num[i] > b.num[i];
+          return false;
+        };
+        const best = {};
+        for (const r of list) {
+          if (!r || r.draft) continue;
+          const p = parse(String(r.tag_name || ""));
+          if (!p) continue;
+          let ch = null;
+          if (!p.pre) ch = "latest";
+          else if (p.pre === "next") ch = "next";
+          else continue;
+          if (!newer(p, best[ch])) continue;
+          const a = (r.assets || []).find(x => rx.test(x.name || ""));
+          best[ch] = { num: p.num, ver: p.raw, url: (a && a.browser_download_url) || r.html_url || "" };
+        }
+        for (const ch of ["latest", "next"]) {
+          if (best[ch]) console.log(ch + "\t" + best[ch].ver + "\t" + best[ch].url);
+        }
+      });
+    ' 2>/dev/null)"
   fi
+  while IFS=$'\t' read -r ch v u; do
+    [ -n "$v" ] || continue
+    case "$ch" in
+      latest) _DSH_SHELL_LATEST="$v"; _DSH_SHELL_URL="$u" ;;
+      next)   _DSH_SHELL_NEXT="$v";   _DSH_SHELL_NEXT_URL="$u" ;;
+    esac
+  done <<< "$rows"
+  return 0
+}
+
+# 壳升级候选（channel<TAB>ver<TAB>url），只保留严格新于当前版本的渠道。
+# 注：壳的 plist 版本号不带渠道后缀（CFBundleShortVersionString 只能是 X.Y.Z），
+# 所以无法从已装版本反推渠道——一律只提示「更新」，绝不提示降级：
+# 装在 2.0.15 时，latest 2.0.15 与 next 2.0.15-next 都不会被推荐。
+# 比较按「基础版本」（去掉 -next 等后缀）进行，避免同一版本的跨渠道互推。
+# 未安装（install 场景）时 _DSH_SHELL_CUR 为空 → 两个渠道都不做过滤。
+_dsh_shell_base_ver() { printf '%s' "${1%%-*}"; }
+_dsh_shell_candidates() {
+  local inst="${_DSH_SHELL_CUR:-}" nv="" lv="" cur_base
+  cur_base="$(_dsh_shell_base_ver "$inst")"
+  if [ -n "${_DSH_SHELL_NEXT:-}" ] && { [ -z "$inst" ] || _dsh_ver_gt "$(_dsh_shell_base_ver "$_DSH_SHELL_NEXT")" "$cur_base"; }; then nv="$_DSH_SHELL_NEXT"; fi
+  if [ -n "${_DSH_SHELL_LATEST:-}" ] && { [ -z "$inst" ] || _dsh_ver_gt "$(_dsh_shell_base_ver "$_DSH_SHELL_LATEST")" "$cur_base"; }; then lv="$_DSH_SHELL_LATEST"; fi
+  if [ -n "$nv" ] && [ "$nv" = "$lv" ]; then printf 'next/latest\t%s\t%s\n' "$nv" "$_DSH_SHELL_NEXT_URL"; return 0; fi
+  [ -n "$nv" ] && printf 'next\t%s\t%s\n' "$nv" "$_DSH_SHELL_NEXT_URL"
+  [ -n "$lv" ] && printf 'latest\t%s\t%s\n' "$lv" "$_DSH_SHELL_URL"
+  return 0
+}
+
+# 非交互场景的默认目标：稳定版优先，没有稳定版才退回 next。输出 ver<TAB>url。
+_dsh_shell_default_target() {
+  if [ -n "${_DSH_SHELL_LATEST:-}" ]; then printf '%s\t%s' "$_DSH_SHELL_LATEST" "$_DSH_SHELL_URL"
+  elif [ -n "${_DSH_SHELL_NEXT:-}" ]; then printf '%s\t%s' "$_DSH_SHELL_NEXT" "$_DSH_SHELL_NEXT_URL"
+  fi
+}
+
+# 解析选择结果（纯函数，便于测试）：$1=候选行 $2=用户输入 → 命中输出 ver<TAB>url 并返回 0
+_dsh_shell_pick_apply() {
+  local rows="$1" sel="$2" i=0 label ver url
+  sel="$(printf '%s' "$sel" | tr -d '[:space:]')"
+  [ -z "$sel" ] && return 1
+  [ "$sel" = "0" ] && return 1
+  case "$sel" in *[!0-9]*) return 1 ;; esac
+  while IFS=$'\t' read -r label ver url; do
+    [ -n "$ver" ] || continue
+    i=$((i+1))
+    if [ "$i" -eq "$sel" ]; then printf '%s\t%s' "$ver" "$url"; return 0; fi
+  done <<< "$rows"
+  return 1
+}
+
+# ---- 交互式选择壳升级目标（一次单选；结果写入 _DSH_SHELL_PICK / _DSH_SHELL_PICK_URL）----
+# 返回 0=已选中；1=无候选或用户跳过；2=非交互环境。升级动作由调用方执行。
+_dsh_shell_pick() {
+  local rows i=0 label ver url sel inst list="" picked=""
+  rows="$(_dsh_shell_candidates)"
+  [ -n "$rows" ] || return 1
+  inst="${_DSH_SHELL_CUR:-未安装}"
+  if [ ! -t 0 ]; then
+    while IFS=$'\t' read -r label ver url; do
+      [ -n "$ver" ] || continue
+      list="${list}${list:+, }${ver}（${label}）"
+    done <<< "$rows"
+    echo "ℹ 检测到桌面壳更新可用（${inst} → ${list}），非交互环境未自动升级。"
+    return 2
+  fi
+  echo "=== DSH Desktop 壳升级 ==="
+  echo "当前版本：${inst}"
+  while IFS=$'\t' read -r label ver url; do
+    [ -n "$ver" ] || continue
+    i=$((i+1))
+    printf '  [%d] %-12s %-14s %s\n' "$i" "$label" "$ver" "$(_dsh_channel_desc "$label")"
+  done <<< "$rows"
+  echo "  [0] 跳过（保持当前版本）"
+  printf '选择要升级到的渠道 [0-%d]（回车=0）: ' "$i"
+  IFS= read -r sel || return 1
+  sel="$(printf '%s' "$sel" | tr -d '[:space:]')"
+  [ -z "$sel" ] && sel=0
+  case "$sel" in *[!0-9]*) echo "⚠ 输入非数字，已跳过升级。"; return 1 ;; esac
+  if [ "$sel" -eq 0 ]; then echo "已跳过升级。"; return 1; fi
+  if [ "$sel" -gt "$i" ]; then echo "⚠ 编号越界（0-${i}），已跳过升级。"; return 1; fi
+  picked="$(_dsh_shell_pick_apply "$rows" "$sel")"
+  [ -n "$picked" ] || { echo "⚠ 未能定位编号 ${sel}，已跳过升级。"; return 1; }
+  _DSH_SHELL_PICK="${picked%%$'\t'*}"
+  _DSH_SHELL_PICK_URL="${picked#*$'\t'}"
   return 0
 }
 
@@ -675,25 +873,10 @@ _dsh_desktop_check() {
 
 _dsh_web() {
   _dsh_check_update
-  local cands=() seen="" v
-  for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
-    [ -z "$v" ] && continue
-    # 只有比当前版本更新才算候选（避免源码装的 alpha 被误提示降级到 npm 旧版）
-    _dsh_ver_gt "$v" "$_DSH_INST" || continue
-    case "$seen" in *"|$v|"*) continue;; esac
-    seen="$seen|$v|"; cands+=("$v")
-  done
-  if [ ${#cands[@]} -gt 0 ] && [ -t 0 ]; then
-    for v in "${cands[@]}"; do
-      _dsh_space_estimate_npm "$v"
-      if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then
-        _dsh_do_upgrade "$v" || echo "⚠ $v 升级失败"
-      else
-        echo "  跳过 $v"
-      fi
-    done
-  elif [ ${#cands[@]} -gt 0 ]; then
-    echo "ℹ 检测到 runtime 更新可用（$_DSH_INST → ${cands[*]}），非交互环境未自动升级。"
+  # 升级目标单次单选（next / latest 是两个渠道，不是连续两跳；候选只含比当前更新的版本）
+  if _dsh_update_pick; then
+    _dsh_space_estimate_npm "$_DSH_PICK"
+    _dsh_do_upgrade "$_DSH_PICK" || echo "⚠ ${_DSH_PICK} 升级失败"
   fi
   if ! _dsh_native_check "$DSH_HOME/runtime"; then
     echo "已阻止启动：Runtime 的 native addon 缺失或与当前 Node/CPU ABI 不匹配。"
@@ -745,13 +928,13 @@ _dsh_realpath() {
 _dsh_doctor() {
   echo "=== DSH 自检 (doctor) ==="
   local fail=0
-  # 1) heal 后关键包是否仍解析到 runtime
+  # 1) 关键包是否仍解析到 runtime（旧版 dsh 会先复现启动自愈再校验；0.1.7-alpha.1 起降级为静态校验）
   if command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/verify-heal.mjs" ]; then
     local log; log="$(mktemp -t dsh-doc.XXXXXX.log)"
     if node "$BIN_DIR/verify-heal.mjs" >"$log" 2>&1; then
-      echo "  [OK]   heal 后关键包全部解析到 runtime"
+      echo "  [OK]   profiles 关键包全部解析到 runtime"
     else
-      echo "  [FAIL] 存在未指向 runtime 的包："; sed 's/^/      /' "$log"
+      echo "  [FAIL] profiles 软链校验未通过（下方为 verify-heal 完整输出）："; sed 's/^/      /' "$log"
       fail=1
     fi
     rm -f "$log"
@@ -796,9 +979,12 @@ _dsh_doctor() {
   # 5) 版本与更新可用性
   _dsh_check_update; _dsh_shell_check
   echo "  runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
-  echo "  壳:     ${_DSH_SHELL_CUR:-未知}（最新=${_DSH_SHELL_LATEST:-无}）"
+  echo "  壳:     ${_DSH_SHELL_CUR:-未知}（latest=${_DSH_SHELL_LATEST:-无} ｜ next=${_DSH_SHELL_NEXT:-无}）"
   { [ -n "${_DSH_NEXT:-}" ] && _dsh_ver_gt "$_DSH_NEXT" "$_DSH_INST"; } || { [ -n "${_DSH_LATEST:-}" ] && _dsh_ver_gt "$_DSH_LATEST" "$_DSH_INST"; } \
     && echo "  [INFO] runtime 有可用更新"
+  if [ -n "$(_dsh_shell_candidates)" ]; then
+    echo "  [INFO] 桌面壳有可用更新（dsm shell 查看渠道并升级）"
+  fi
   echo "=== 自检完成: $([ $fail -eq 0 ] && echo '无致命问题 ✅' || echo '存在 FAIL，请处理 ❌') ==="
   return $fail
 }
@@ -1073,7 +1259,7 @@ _dsh_install() {
   _dsh_shell_check
   if [ $dry -eq 1 ]; then
     echo "ℹ install --dry-run（不做任何改动）："
-    [ $doshell -eq 1 ] && echo "    桌面壳: 将安装 ${_DSH_SHELL_LATEST:-未知}（来源 ${_DSH_SHELL_URL:-无}）"
+    [ $doshell -eq 1 ] && echo "    桌面壳: 将安装 ${_DSH_SHELL_LATEST:-${_DSH_SHELL_NEXT:-未知}}（渠道：latest=${_DSH_SHELL_LATEST:-无} ｜ next=${_DSH_SHELL_NEXT:-无}；交互时单选）"
     [ $dort -eq 1 ] && echo "    runtime: 将引导 @deepseek-ai/dsh@${rtver:-latest}"
     [ $doshell -eq 0 ] && echo "    桌面壳: 跳过（--no-shell）"
     [ $dort -eq 0 ] && echo "    runtime: 跳过（--no-runtime）"
@@ -1082,12 +1268,17 @@ _dsh_install() {
   fi
   if [ $doshell -eq 1 ]; then
     if [ -t 0 ]; then
-      _dsh_space_estimate_shell "${_DSH_SHELL_URL:-}"
-      if _dsh_confirm "安装桌面壳（DSH Desktop ${_DSH_SHELL_LATEST:-最新}）? [y/N] "; then
-        _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST" || echo "⚠ 壳安装失败，可手动安装后重跑"
+      if _dsh_shell_pick; then
+        _dsh_space_estimate_shell "$_DSH_SHELL_PICK_URL"
+        _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_PICK_URL" "$_DSH_SHELL_PICK" || echo "⚠ 壳安装失败，可手动安装后重跑"
       else echo "  跳过壳安装（--no-shell 可显式跳过）"; fi
     else
-      _dsh_shell_install "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST" || echo "⚠ 壳安装失败（非交互环境已尝试）"
+      dtgt="$(_dsh_shell_default_target)"
+      if [ -n "$dtgt" ]; then
+        _dsh_shell_install "$_DSH_SHELL_CUR" "${dtgt#*$'\t'}" "${dtgt%%$'\t'*}" || echo "⚠ 壳安装失败（非交互环境已尝试）"
+      else
+        echo "ℹ 未探测到可安装的壳版本，跳过（稍后可运行 dsm install 或 dsm shell）。"
+      fi
     fi
   fi
   if [ $dort -eq 1 ]; then
@@ -1112,29 +1303,37 @@ case "$cmd" in
       if [ -z "${_DSH_NEXT:-}${_DSH_LATEST:-}" ]; then
         echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-未知}"
       else
-        inst="${_DSH_INST:-未知}"
-        for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
-          [ -z "$v" ] && continue; _dsh_ver_gt "$v" "$inst" || continue
-          echo "→ 若升级 runtime 到 ${v}（当前 ${inst}）："
-          deps="$(npm view "@deepseek-ai/dsh@$v" dependencies --json 2>/dev/null)"
-          echo "    依赖变更："
-          printf '%s\n' "$deps" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const ks=Object.keys(o);console.log(ks.length?ks.map(k=>"      - "+k+"@"+o[k]).join("\n"):"      (无可列依赖)")}catch(e){console.log("      (无法解析依赖)")}})'
-        done
+        inst="${_DSH_INST:-未知}"; cands="$(_dsh_update_candidates)"
+        if [ -z "$cands" ]; then
+          echo "✓ npm registry 已是最新（${inst}）。"
+        else
+          while IFS=$'\t' read -r label v; do
+            [ -n "$v" ] || continue
+            echo "→ 渠道 ${label}：runtime ${inst} → ${v}"
+            deps="$(npm view "@deepseek-ai/dsh@$v" dependencies --json 2>/dev/null)"
+            echo "    依赖变更："
+            printf '%s\n' "$deps" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const ks=Object.keys(o);console.log(ks.length?ks.map(k=>"      - "+k+"@"+o[k]).join("\n"):"      (无可列依赖)")}catch(e){console.log("      (无法解析依赖)")}})'
+          done <<< "$cands"
+        fi
         _dsh_gh_check
         if [ -n "${_DSH_GH_NEW:-}" ]; then
           echo "→ GitHub 源码渠道：官方有更新的源码版本 ${_DSH_GH_NEW}（npm 尚未发布）"
         fi
-        echo "ℹ dry-run 未做任何改动。去掉 --dry-run 可交互升级（含源码渠道）。"
+        echo "ℹ dry-run 未做任何改动。去掉 --dry-run 可交互选择渠道升级（含源码渠道）。"
       fi
     else
       if [ -z "${_DSH_NEXT:-}${_DSH_LATEST:-}" ]; then
         echo "✗ 未能获取 runtime 最新版本（可能离线），当前: ${_DSH_INST:-未知}"
       else
-        cands=(); seen=""; for v in "$_DSH_NEXT" "$_DSH_LATEST"; do
-          [ -z "$v" ] && continue; _dsh_ver_gt "$v" "$_DSH_INST" || continue
-          case "$seen" in *"|$v|"*) continue;; esac; seen="$seen|$v|"; cands+=("$v")
-        done
-        if [ ${#cands[@]} -eq 0 ]; then
+        cands="$(_dsh_update_candidates)"
+        if [ -n "$cands" ]; then
+          # 一次单选：选渠道 → 只执行一次升级。旧实现把 next / latest 当两个候选逐个
+          # y/N 确认，升到 next 后还会追问 latest（降级）——已改为交互式选择。
+          if _dsh_update_pick; then
+            _dsh_space_estimate_npm "$_DSH_PICK"
+            if _dsh_do_upgrade "$_DSH_PICK"; then _dsh_plugin_api_check || true; else echo "⚠ ${_DSH_PICK} 失败"; fi
+          fi
+        else
           echo "✓ npm registry 已是最新（${_DSH_INST}）。"
           # npm 无候选时，探测官方 GitHub 是否有更新的源码版本（npm 尚未发布）
           _dsh_gh_check
@@ -1149,13 +1348,7 @@ case "$cmd" in
               echo "ℹ 非交互环境，跳过。npm 发布后 dsm update 即可正常升级。"
             fi
           fi
-        elif [ ! -t 0 ]; then echo "ℹ 非交互环境，跳过自动更新（当前 ${_DSH_INST}；可用: ${cands[*]}）。"
-        else for v in "${cands[@]}"; do
-          _dsh_space_estimate_npm "$v"
-          if _dsh_confirm "升级 runtime 到 $v? [y/N] "; then
-            if _dsh_do_upgrade "$v"; then _dsh_plugin_api_check || true; else echo "⚠ $v 失败"; fi
-          else echo "  跳过 $v"; fi
-        done; fi
+        fi
       fi
     fi
     ;;
@@ -1185,14 +1378,15 @@ case "$cmd" in
     ;;
   shell)
     _dsh_shell_check
-    echo "壳 当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-未知}"
-    if [ -z "${_DSH_SHELL_LATEST:-}" ] || [ "$_DSH_SHELL_LATEST" = "$_DSH_SHELL_CUR" ]; then
+    echo "壳 当前: ${_DSH_SHELL_CUR:-未知} ｜ latest: ${_DSH_SHELL_LATEST:-无} ｜ next: ${_DSH_SHELL_NEXT:-无}"
+    if [ -z "$(_dsh_shell_candidates)" ]; then
       echo "✓ 壳已是最新。"
-    elif [ -t 0 ]; then
-      _dsh_space_estimate_shell "$_DSH_SHELL_URL"
-      if _dsh_confirm "升级壳到 $_DSH_SHELL_LATEST? [y/N] "; then _dsh_shell_upgrade "$_DSH_SHELL_CUR" "$_DSH_SHELL_URL" "$_DSH_SHELL_LATEST"; else echo "已取消。"; fi
+    elif _dsh_shell_pick; then
+      _dsh_space_estimate_shell "$_DSH_SHELL_PICK_URL"
+      _dsh_shell_upgrade "$_DSH_SHELL_CUR" "$_DSH_SHELL_PICK_URL" "$_DSH_SHELL_PICK" || echo "⚠ 壳升级未完成，可重跑 dsm shell"
     else
-      echo "ℹ 非交互环境，未自动升级壳。可手动运行 dsh-manage.sh shell（在 tty 中）。"
+      _dsh_pick_rc=$?
+      [ "$_dsh_pick_rc" -eq 2 ] || echo "ℹ 未升级；可在 tty 中运行：dsm shell"
     fi
     ;;
   web) _dsh_web "$@" ;;
@@ -1210,13 +1404,18 @@ case "$cmd" in
     upd=""
     [ -n "${_DSH_NEXT:-}" ] && _dsh_ver_gt "$_DSH_NEXT" "$_DSH_INST" && upd="runtime:next=$_DSH_NEXT"
     [ -n "${_DSH_LATEST:-}" ] && _dsh_ver_gt "$_DSH_LATEST" "$_DSH_INST" && upd="${upd:+$upd, }latest=$_DSH_LATEST"
-    [ -n "${_DSH_SHELL_LATEST:-}" ] && [ "$_DSH_SHELL_CUR" != "$_DSH_SHELL_LATEST" ] && upd="${upd:+$upd, }shell=$_DSH_SHELL_LATEST"
+    sc_upd=""
+    while IFS=$'\t' read -r sc_ch sc_v sc_u; do
+      [ -n "$sc_v" ] || continue
+      sc_upd="${sc_upd:+$sc_upd, }${sc_v}（${sc_ch}）"
+    done <<< "$(_dsh_shell_candidates)"
+    if [ -n "$sc_upd" ]; then upd="${upd:+$upd, }shell=${sc_upd}"; fi
     if [ $cron -eq 1 ]; then
       echo "dsh-check $(date -u +%FT%TZ) runtime=$_DSH_INST shell=$_DSH_SHELL_CUR updates=${upd:-none}"
     else
       echo "=== 健康检查 (check) ==="
       echo "runtime: ${_DSH_INST:-未知}（next=${_DSH_NEXT:-无} latest=${_DSH_LATEST:-无}）"
-      echo "壳:     ${_DSH_SHELL_CUR:-未知}（最新=${_DSH_SHELL_LATEST:-无}）"
+      echo "壳:     ${_DSH_SHELL_CUR:-未知}（latest=${_DSH_SHELL_LATEST:-无} ｜ next=${_DSH_SHELL_NEXT:-无}）"
       echo "更新可用: ${upd:-无}"
       echo "--- 自检 ---"
       _dsh_doctor || true
@@ -1233,7 +1432,7 @@ case "$cmd" in
   status)
     _dsh_check_update; _dsh_shell_check
     echo "runtime 当前: ${_DSH_INST:-未知} ｜ next: ${_DSH_NEXT:-无} ｜ latest: ${_DSH_LATEST:-无}"
-    echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ 最新: ${_DSH_SHELL_LATEST:-无}"
+    echo "壳     当前: ${_DSH_SHELL_CUR:-未知} ｜ latest: ${_DSH_SHELL_LATEST:-无} ｜ next: ${_DSH_SHELL_NEXT:-无}"
     ;;
   *) echo "用法: dsh-manage.sh {install [--runtime <ver>|--no-shell|--no-runtime|--dry-run]|update [--dry-run]|update-runtime <ver>|update-src [<ver>]|shell|web [--force] [args..]|pin|repair-native|status|doctor|scan|check [--cron]|rollback [runtime|shell|all]|cleanup [--dry-run]}" >&2; exit 1 ;;
 esac

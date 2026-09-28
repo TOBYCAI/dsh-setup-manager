@@ -22,7 +22,7 @@ Runtime 安装默认禁止任意依赖执行 lifecycle script，仅在严格的�
 
 DSH Desktop 的打包形态**换过一次**：**≤ 2.0.5 是「共享安装」的壳**（App 包不内嵌完整的 `@deepseek-ai/dsh*`，依赖 `~/.dsh/runtime` 提供上游 Harness）；**≥ 2.0.7 改为「自包含」**（整棵 `node_modules` 打进 `app.asar`，壳跑自己的 dsh 副本）。两种形态各有长期痛点：
 
-1. **壳与 runtime 的关系是隐式的** —— ≤2.0.5：桌面启动时 `healProfilesModuleFallback()` 会按 App 包的依赖闭包把 `~/.dsh/profiles/node_modules/@deepseek-ai/*` 重新软链接，一旦壳把 dsh 又塞回 App 包，你的 runtime 升级与补丁就被静默覆盖；≥2.0.7：壳自带副本与 CLI runtime 是**两份独立副本**，两者的**版本偏差**不会自己暴露（壳不会崩，但两端行为与插件 API 面可能不同），而且升级 runtime 不再影响壳。
+1. **壳与 runtime 的关系是隐式的** —— ≤2.0.5：桌面启动时 `healProfilesModuleFallback()` 会按 App 包的依赖闭包把 `~/.dsh/profiles/node_modules/@deepseek-ai/*` 重新软链接，一旦壳把 dsh 又塞回 App 包，你的 runtime 升级与补丁就被静默覆盖（**现状**：dsh 0.1.7-alpha.1 起该 API 已从 `dsh-app-boot` **删除**，壳不再在启动时改写 profiles 软链，pin 的结果长期有效、此项风险消失——本工具包对模式 A 的处理仅对旧版 runtime/壳有效）；≥2.0.7：壳自带副本与 CLI runtime 是**两份独立副本**，两者的**版本偏差**不会自己暴露（壳不会崩，但两端行为与插件 API 面可能不同），而且升级 runtime 不再影响壳。
 2. **pnpm 升级/装插件被拦截** —— 如果你在 WorkBuddy / CodeBuddy 之类宿主的终端里启动 `dsh web`，宿主注入的 `CODEBUDDY_SAFE_DELETE_*` 环境变量会让 pnpm 清理临时目录时触发批量删除确认（`SAFE_DELETE_BULK_CONFIRM_REQUIRED`），非交互环境直接失败。
 
 本工具包把上述问题的**可靠解法**固化成可复用脚本。
@@ -174,13 +174,17 @@ dsm install --dry-run          # 只报告将做什么，不改动
 # 1) 首次 / 壳更新后：把 runtime 钉死为权威
 dsm pin
 
-# 2) 升级 runtime（交互确认 @next / @latest 各自版本）
+# 2) 升级 runtime（列出 next / latest 两个渠道，单选一个执行）
 dsm update
 # 或单步非交互升级到指定版本：
 dsm update-runtime 0.1.1-rc.2
 # 或从官方 GitHub 源码构建安装（npm 尚未发布的版本，如 alpha；缺省探测最新 dsh-v* tag）：
 dsm update-src
 dsm update-src 0.1.2-alpha.1
+
+# ⚠ next 与 latest 是**两个渠道**（dist-tag），不是「连续两跳」：菜单里选一个就只执行
+#   一次升级（两渠道同版本时合并为一行 next/latest），不会升完 next 再问你 latest。
+#   输入编号选择，回车或 0 跳过。`dsm web` 启动前的升级提示走同一套单选。
 
 # ⚠ 升级前会先显示本次的空间预估：npm 渠道报包本体大小、官方依赖数量、
 #   本机现有 runtime 实际占用参照与 pnpm store 提示；源码渠道报源码缓存
@@ -189,6 +193,10 @@ dsm update-src 0.1.2-alpha.1
 
 # 3) 升级桌面壳（dsh-manage.sh 自动从 DSH Desktop 的 GitHub Releases 下载 universal dmg，备份后替换）
 dsm shell
+# ⚠ 壳同样是**两个渠道单选**：latest（稳定版，tag 无后缀）与 next（预发布，tag 带 -next）。
+#   上游把 -next 也标成「正式发布」，因此 releases/latest 端点会返回 next 版——本工具改为
+#   按 tag 后缀分渠道拉取，不会再把预发布壳当成「最新稳定版」。菜单里选一个就只升一次，
+#   latest 与 next 的安装包名不同（DSH.Desktop-* vs DSH-NEXT-*），各自带自己的下载地址。
 
 # 4) 启动 web（自动卸载 safe-delete 守卫，避免 pnpm 被拦截）
 dsm web
@@ -226,10 +234,10 @@ dsm update --dry-run
 |------|------|------|
 | `install` | 首次安装：下载桌面壳 + 引导 runtime + 自动 pin + doctor | 写（首次安装） |
 | `status` | 显示 runtime / 壳 / 守卫变量 / 已装 adapter 版本 | 只读 |
-| `update [--dry-run]` | 升级 runtime（`--dry-run` 仅预览依赖树变更） | 写（dry-run 只读） |
+| `update [--dry-run]` | 升级 runtime：列出 next / latest 渠道单选（`--dry-run` 仅预览依赖树变更） | 写（dry-run 只读） |
 | `update-runtime <ver>` | 单步非交互升级 runtime 到指定版本 | 写 |
 | `update-src [<ver>]` | 从官方 GitHub 源码构建安装（npm 未发布时可用；缺省探测最新 dsh-v* tag） | 写 |
-| `shell` | 升级桌面壳（下载备份替换；Linux/Windows 框架已就位，标注未验证） | 写 |
+| `shell` | 升级桌面壳（latest / next 渠道单选；下载备份替换；Linux/Windows 框架已就位，标注未验证） | 写 |
 | `web` | 启动 web（自动卸载 safe-delete 守卫；启动前静态预检插件↔runtime API 冲突，命中则阻止启动，`--force` 可绕过） | 启动进程 |
 | `scan` | 扫描已装 LLM adapter 与 runtime dsh 版本的 semver 兼容范围；并静态比对插件对 runtime 的 API 导入，预检可能导致启动崩溃的冲突 | 只读 |
 | `check [--cron]` | 仅报告模式自检（可挂定时任务），含插件与 Desktop 兼容性 | 只读 |

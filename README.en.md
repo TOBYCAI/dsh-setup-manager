@@ -22,7 +22,7 @@ Arbitrary dependency lifecycle scripts remain disabled by default. Native addons
 
 The DSH Desktop packaging model **changed once**: **≤ 2.0.5 is a "shared install" shell** (the App bundle does not embed the full `@deepseek-ai/dsh*` and relies on `~/.dsh/runtime` for the upstream Harness); **≥ 2.0.7 is "self-contained"** (the whole `node_modules` is packed into `app.asar`, and the shell runs its own dsh copy). Each mode has its own long-term pain point:
 
-1. **The shell↔runtime relationship is implicit** — ≤ 2.0.5: on launch, `healProfilesModuleFallback()` re-symlinks `~/.dsh/profiles/node_modules/@deepseek-ai/*` based on the App bundle's dependency closure; if a future shell re-bundles dsh, your runtime upgrades and patches are silently overwritten. ≥ 2.0.7: the shell's bundled copy and the CLI runtime are **two independent copies**, and the **version skew** between them is invisible on its own (the shell won't crash, but the two sides may differ in behaviour and in the plugin API surface) — and upgrading the runtime no longer affects the shell.
+1. **The shell↔runtime relationship is implicit** — ≤ 2.0.5: on launch, `healProfilesModuleFallback()` re-symlinks `~/.dsh/profiles/node_modules/@deepseek-ai/*` based on the App bundle's dependency closure; if a future shell re-bundles dsh, your runtime upgrades and patches are silently overwritten (**note**: since dsh 0.1.7-alpha.1 this API has been **removed** from `dsh-app-boot`, so the shell no longer rewrites profile symlinks at launch — pin results persist and this risk is gone; the toolkit's mode-A handling only applies to older runtime/shell builds). ≥ 2.0.7: the shell's bundled copy and the CLI runtime are **two independent copies**, and the **version skew** between them is invisible on its own (the shell won't crash, but the two sides may differ in behaviour and in the plugin API surface) — and upgrading the runtime no longer affects the shell.
 2. **pnpm upgrades / plugin installs get blocked** — if you launch `dsh web` from a host terminal such as WorkBuddy / CodeBuddy, the host injects `CODEBUDDY_SAFE_DELETE_*` env vars, causing pnpm's temp-dir cleanup to hit a bulk-delete confirmation (`SAFE_DELETE_BULK_CONFIRM_REQUIRED`) that cannot be answered in a non-interactive context.
 
 This toolkit codifies the **reliable fixes** for the above into reusable scripts.
@@ -174,13 +174,19 @@ dsm install --dry-run        # report what it would do, change nothing
 # 1) First time / after a shell upgrade: pin runtime as authority
 dsm pin
 
-# 2) Upgrade runtime (interactively confirm @next / @latest)
+# 2) Upgrade runtime (lists the next / latest channels; pick one)
 dsm update
 # or non-interactively to a specific version:
 dsm update-runtime 0.1.1-rc.2
 # or build from official GitHub source (for versions npm hasn't published yet, e.g. alpha; no arg probes the latest dsh-v* tag):
 dsm update-src
 dsm update-src 0.1.2-alpha.1
+
+# ⚠ next and latest are two **channels** (dist-tags), not two consecutive hops: picking
+#   one runs a single upgrade (when both point at the same version they collapse into
+#   one "next/latest" row), so you are never asked about latest right after upgrading
+#   to next. Type a number to choose; Enter or 0 skips. The pre-launch upgrade prompt
+#   in `dsm web` uses the same single-choice flow.
 
 # ⚠ Before any upgrade, dsm shows a disk-space estimate: the npm channel reports
 #   the package size, official dependency count and your current runtime footprint
@@ -191,6 +197,12 @@ dsm update-src 0.1.2-alpha.1
 
 # 3) Upgrade the desktop shell (dsh-manage.sh auto-downloads the universal dmg from DSH Desktop's GitHub Releases, backs up then replaces)
 dsm shell
+# ⚠ The shell is also a two-channel single choice: latest (stable, no tag suffix) vs
+#   next (prerelease, -next suffix). Upstream marks -next as a normal release as well,
+#   so the releases/latest endpoint returns the next build — dsm now splits channels by
+#   tag suffix and never mistakes a prerelease shell for the latest stable. One pick does
+#   one upgrade; the two channels ship differently named assets (DSH.Desktop-* vs
+#   DSH-NEXT-*), each resolved to its own download URL.
 
 # 4) Launch web (auto-unloads safe-delete guard so pnpm isn't blocked)
 dsm web
@@ -228,10 +240,10 @@ dsm update --dry-run
 |------------|--------------|----------------|
 | `install` | First-time setup: install shell + bootstrap runtime + auto pin + doctor | writes (first install) |
 | `status` | Show runtime / shell / guard vars / installed adapter versions | read-only |
-| `update [--dry-run]` | Upgrade runtime (`--dry-run` previews dependency-tree changes) | write (dry-run: read-only) |
+| `update [--dry-run]` | Upgrade the runtime: lists next / latest channels for a single pick (`--dry-run` previews dependency-tree changes only) | write (dry-run: read-only) |
 | `update-runtime <ver>` | Single-step non-interactive runtime upgrade to a version | write |
 | `update-src [<ver>]` | Build & install from official GitHub source (for versions not yet on npm; no arg probes the latest dsh-v* tag) | write |
-| `shell` | Upgrade the desktop shell (download, backup, replace; Linux/Windows framework in place, marked unverified) | write |
+| `shell` | Upgrade the desktop shell (latest / next channel single choice; download, backup, replace; Linux/Windows framework in place, marked unverified) | write |
 | `web` | Launch web (auto-unload safe-delete guard; statically pre-checks plugin↔runtime API conflicts before launch — blocks on a hit, `--force` bypasses) | launches process |
 | `scan` | Scan installed LLM adapters vs runtime dsh version semver range; also statically diff plugins' runtime API imports to pre-check conflicts that would crash startup | read-only |
 | `check [--cron]` | Report-only self-check (wire into a scheduled task), incl. plugin & Desktop compatibility | read-only |

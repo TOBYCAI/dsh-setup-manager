@@ -5,7 +5,8 @@
 # 覆盖：
 #   1) 全部脚本语法检查（bash -n / node --check）
 #   2) pin-runtime.sh 把 App / profiles 的 @deepseek-ai/* 软链到 runtime
-#   3) verify-heal.mjs 经（mock）heal 后，关键包仍解析到 runtime
+#   3) verify-heal.mjs：旧版 dsh 经（mock）heal 后关键包仍解析到 runtime；
+#      dsh ≥0.1.7-alpha.1（无 healProfilesModuleFallback 导出）时降级为静态校验且不抛异常
 #   4) scan-adapters.mjs 在 mock 环境下能正常跑（无 adapter 时只报“无”）
 #
 # 用法： bash tests/integration.sh
@@ -79,10 +80,14 @@ assert_link "$PROF" "profiles 内"
 
 echo "== 4) verify-heal.mjs（mock heal）=="
 OUT="$(DSH_HOME="$MOCK" node "$BIN_DIR/verify-heal.mjs" --dsh-home "$MOCK" --app-pkg "$APP_PKG_JSON" 2>&1)"
-if printf '%s' "$OUT" | grep -q "所有关键包经 heal 后仍解析到 runtime"; then
+if printf '%s' "$OUT" | grep -qE "所有关键包.*仍解析到 runtime"; then
   ok "verify-heal 报告全部解析到 runtime"
 else
   bad "verify-heal 未通过："; printf '%s\n' "$OUT" | sed 's/^/      /'; fi
+if printf '%s' "$OUT" | grep -q "模拟启动自愈"; then
+  ok "verify-heal 在 heal API 存在时走 heal 模拟路径"
+else
+  bad "verify-heal 未走 heal 模拟路径：$(printf '%s' "$OUT" | grep '校验模式' || echo '(无校验模式行)')"; fi
 
 echo "== 5) scan-adapters.mjs（mock：无第三方 adapter）=="
 if SOUT="$(DSH_HOME="$MOCK" node "$BIN_DIR/scan-adapters.mjs" 2>&1)"; then
@@ -142,6 +147,57 @@ assert_link "$SCPROF" "自包含壳的 profiles"
 # 反例：显式声明为共享软链（DSH_APP_SELF_CONTAINED=0）时应照旧改写 .app
 SOUT2="$(DSH_HOME="$SCH" DSH_APP_PKG="$SCAPP" DSH_APP_SELF_CONTAINED=0 bash "$BIN_DIR/pin-runtime.sh" 2>&1)" || true
 assert_link "$SCAPP" "强制 shared 时的 App 内"
+
+echo "== 10) runtime 升级渠道单选（next / latest 二选一）=="
+if UOUT="$(bash "$TESTS_DIR/update-pick.sh" 2>&1)"; then
+  ok "升级渠道单选回归测试通过"
+  printf '%s\n' "$UOUT" | grep -E "通过 / " | sed 's/^/      /'
+else
+  bad "升级渠道单选回归测试失败"; printf '%s\n' "$UOUT" | sed 's/^/      /'
+fi
+
+echo "== 11) 桌面壳升级渠道单选（latest / next，按 tag 后缀分渠道）=="
+if SOUT="$(bash "$TESTS_DIR/shell-pick.sh" 2>&1)"; then
+  ok "壳升级渠道单选回归测试通过"
+  printf '%s\n' "$SOUT" | grep -E "通过 / " | sed 's/^/      /'
+else
+  bad "壳升级渠道单选回归测试失败"; printf '%s\n' "$SOUT" | sed 's/^/      /'
+fi
+
+echo "== 12) verify-heal.mjs：dsh ≥0.1.7 无 heal API 时降级为静态校验（不得抛异常）=="
+# 注意：9) 把全局 $RT 切到了自包含场景，这里显式用回主 mock 的 runtime
+MOCKRT="$MOCK/runtime/node_modules/@deepseek-ai"
+# 覆盖 mock 的 dsh-app-boot：0.1.7-alpha.1 起不再导出 healProfilesModuleFallback
+cat > "$MOCKRT/dsh-app-boot/lib/index.js" <<'EOF'
+// mock: dsh 0.1.7-alpha.1+ 形态 —— healProfilesModuleFallback 已被上游删除
+module.exports = {};
+EOF
+if OUT2="$(DSH_HOME="$MOCK" node "$BIN_DIR/verify-heal.mjs" --dsh-home "$MOCK" --app-pkg "$APP_PKG_JSON" 2>&1)"; then
+  ok "verify-heal 在缺失 heal API 时正常退出（未抛 TypeError）"
+  if printf '%s' "$OUT2" | grep -q "静态软链校验"; then
+    ok "verify-heal 明确标注降级为静态校验"
+  else
+    bad "verify-heal 未标注静态校验模式"; fi
+  if printf '%s' "$OUT2" | grep -qE "所有关键包.*仍解析到 runtime"; then
+    ok "verify-heal 静态校验结论正确（仍解析到 runtime）"
+  else
+    bad "verify-heal 静态校验结论异常：$(printf '%s' "$OUT2" | tail -1)"; fi
+else
+  bad "verify-heal 在缺失 heal API 时退出非 0："; printf '%s\n' "$OUT2" | sed 's/^/      /'
+fi
+
+# 反向用例：profiles 未初始化 → 明确提示跳过，而不是静默报「全部 OK」
+MOCK2="$TMP/.dsh-noprof"
+mkdir -p "$MOCK2/runtime"
+cp -R "$MOCK/runtime/node_modules" "$MOCK2/runtime/node_modules"
+if OUT3="$(DSH_HOME="$MOCK2" node "$BIN_DIR/verify-heal.mjs" --dsh-home "$MOCK2" 2>&1)"; then
+  if printf '%s' "$OUT3" | grep -q "未初始化"; then
+    ok "profiles 未初始化时明确提示跳过（不误报 OK）"
+  else
+    bad "profiles 未初始化时未提示：$(printf '%s' "$OUT3" | tail -1)"; fi
+else
+  bad "profiles 未初始化时应按「无可校验」退出 0，实际非 0："; printf '%s\n' "$OUT3" | sed 's/^/      /'
+fi
 
 echo
 echo "集成测试结果： $pass 通过 / $fail 失败"
